@@ -1,0 +1,23 @@
+# Manifest reference: https://herdr.dev/docs/plugins/
+id = "gitui"
+name = "gitui"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Opens gitui in a new herdr tab and reports session changes (commits, pushes, branch switches) to the agent in the focused pane"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release", "--locked"]
+
+[[actions]]
+id = "open"
+title = "Open gitui"
+description = "Open gitui in a new tab; on quit, send a summary of what changed to the agent in the focused pane"
+contexts = ["workspace"]
+command = ["./target/release/herdr-gitui"]
+
+[[panes]]
+id = "open"
+title = "gitui"
+placement = "tab"
+command = ["./target/release/herdr-gitui"]
