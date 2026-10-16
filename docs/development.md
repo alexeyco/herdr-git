@@ -54,7 +54,7 @@ Real git repos are created per test. Coverage:
 ```
 make build
 herdr plugin link .
-herdr plugin list                     # shows gitui 0.1.0
+herdr plugin list                     # shows gitui 0.2.0
 herdr plugin action invoke gitui.open
 ```
 

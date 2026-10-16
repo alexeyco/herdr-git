@@ -12,11 +12,27 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Stub `herdr`: logs every call, answers `plugin pane open` with a canned JSON
-/// reply, always exits 0.
+/// reply (the popup-shaped `{"id":"cli:plugin","result":{"type":"ok"}}` with no
+/// pane id when `$STUB_PANE_OPEN` is set, else a pane id and tab id), and
+/// answers `plugin config-dir` with the bare path in
+/// `$STUB_CONFIG_DIR` (a blank reply when that variable is unset; a non-zero
+/// exit when `$STUB_CONFIG_DIR_FAIL` is set). Exits 0 otherwise.
 const HERDR_STUB: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$STUB_LOG"
 if [ "$1" = "plugin" ] && [ "$2" = "pane" ] && [ "$3" = "open" ]; then
-  printf '%s\n' '{"result":{"plugin_pane":{"pane":{"pane_id":"pane-stub","tab_id":"tab-stub"}}}}'
+  if [ -n "$STUB_PANE_OPEN" ]; then
+    printf '%s\n' "$STUB_PANE_OPEN"
+  else
+    printf '%s\n' '{"result":{"plugin_pane":{"pane":{"pane_id":"pane-stub","tab_id":"tab-stub"}}}}'
+  fi
+elif [ "$1" = "plugin" ] && [ "$2" = "config-dir" ]; then
+  if [ -n "$STUB_CONFIG_DIR_FAIL" ]; then
+    printf 'config store unavailable\n' >&2
+    exit 1
+  fi
+  if [ -n "$STUB_CONFIG_DIR" ]; then
+    printf '%s\n' "$STUB_CONFIG_DIR"
+  fi
 fi
 exit 0
 "#;
@@ -200,6 +216,83 @@ fn combined_path(stub_dir: &Path) -> String {
     format!("{}:{system_path}", stub_dir.display())
 }
 
+/// The `HERDR_PLUGIN_CONTEXT_JSON` value used by the action-mode tests.
+fn action_ctx(repo: &Path) -> String {
+    format!(
+        r#"{{"workspace_id":"ws-1","focused_pane_id":"p1","focused_pane_agent":"claude","worktree":{{"checkout_path":"{}"}}}}"#,
+        repo.display()
+    )
+}
+
+/// Action-mode env pairs: action id, context, the herdr stub, its log, and
+/// the settings fixture dir. `run_plugin` runs `.env_clear()`, so tests must
+/// pass `HERDR_PLUGIN_CONFIG_DIR` explicitly (`Some(dir)`); `None` leaves it
+/// unset to exercise the `plugin config-dir` callback fallback.
+fn action_env<'a>(
+    ctx: &'a str,
+    herdr: &'a Path,
+    log: &'a Path,
+    config_dir: Option<&'a Path>,
+) -> Vec<(&'a str, &'a str)> {
+    let mut env = vec![
+        ("HERDR_PLUGIN_ACTION_ID", "open"),
+        ("HERDR_PLUGIN_CONTEXT_JSON", ctx),
+        ("HERDR_BIN_PATH", herdr.to_str().unwrap()),
+        ("STUB_LOG", log.to_str().unwrap()),
+    ];
+    if let Some(dir) = config_dir {
+        env.push(("HERDR_PLUGIN_CONFIG_DIR", dir.to_str().unwrap()));
+    }
+    env
+}
+
+/// A settings fixture dir; `content` is written to its `config.toml` when set
+/// (a `None` dir stays empty: missing file, silent defaults).
+fn config_fixture(fx: &Fixture, name: &str, content: Option<&str>) -> PathBuf {
+    let dir = fx.subdir(name);
+    if let Some(content) = content {
+        fs::write(dir.join("config.toml"), content).unwrap();
+    }
+    dir
+}
+
+/// All logged `plugin pane open` argv lines, in launch order.
+fn open_lines(log: &str) -> Vec<String> {
+    log.lines()
+        .filter(|l| l.starts_with("plugin pane open"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The single `plugin pane open` line a one-launch test expects.
+fn sole_open_line(log: &str) -> String {
+    let lines = open_lines(log);
+    assert_eq!(lines.len(), 1, "expected one pane-open line in:\n{log}");
+    lines.into_iter().next().unwrap()
+}
+
+/// Asserts the logged argv uses the default layout: `--placement tab` with
+/// its `--workspace` targeting pair, no `--direction` flag, and the
+/// unconditional trailing `--focus`. All action fixtures resolve workspace
+/// `ws-1`, so the pair's presence is meaningful.
+fn assert_default_layout_argv(open: &str) {
+    assert!(open.contains("--placement tab --workspace ws-1"), "{open}");
+    assert!(!open.contains("--direction"), "{open}");
+    assert!(open.ends_with("--focus"), "{open}");
+}
+
+/// One action launch with a settings dir whose `config.toml` contains
+/// `content`; returns the plugin output and the stub log.
+fn launch_with_config(fx: &Fixture, content: &str) -> (Output, String) {
+    let repo = fx.subdir("repo");
+    let cfg = config_fixture(fx, "config", Some(content));
+    let (herdr, _gitui, log) = fx.stubs();
+    let ctx = action_ctx(&repo);
+    let env = action_env(&ctx, &herdr, &log, Some(&cfg));
+    let out = run_plugin(&env);
+    (out, read_log(&log))
+}
+
 #[test]
 fn pane_happy_path_commit_delivers_summary() {
     let fx = Fixture::new("happy-commit");
@@ -366,18 +459,11 @@ fn pane_no_agent_keeps_summary_and_holds() {
 fn action_opens_pane_with_env_and_focus() {
     let fx = Fixture::new("action");
     let repo = fx.subdir("repo");
+    let cfg = config_fixture(&fx, "config", None);
     let (herdr, _gitui, log) = fx.stubs();
-    let ctx = format!(
-        r#"{{"workspace_id":"ws-1","focused_pane_id":"p1","focused_pane_agent":"claude","worktree":{{"checkout_path":"{}"}}}}"#,
-        repo.display()
-    );
+    let ctx = action_ctx(&repo);
 
-    let out = run_plugin(&[
-        ("HERDR_PLUGIN_ACTION_ID", "open"),
-        ("HERDR_PLUGIN_CONTEXT_JSON", &ctx),
-        ("HERDR_BIN_PATH", herdr.to_str().unwrap()),
-        ("STUB_LOG", log.to_str().unwrap()),
-    ]);
+    let out = run_plugin(&action_env(&ctx, &herdr, &log, Some(&cfg)));
 
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert!(
@@ -385,11 +471,13 @@ fn action_opens_pane_with_env_and_focus() {
         "stderr: {}",
         stderr(&out)
     );
+    assert!(
+        !stderr(&out).contains("herdr-gitui: warning:"),
+        "stderr: {}",
+        stderr(&out)
+    );
     let logged = read_log(&log);
-    let open = logged
-        .lines()
-        .find(|l| l.starts_with("plugin pane open"))
-        .unwrap_or("");
+    let open = sole_open_line(&logged);
     assert!(open.contains("--workspace ws-1"), "{open}");
     assert!(
         open.contains(&format!("--cwd {}", repo.display())),
@@ -404,8 +492,676 @@ fn action_opens_pane_with_env_and_focus() {
         open.contains("--env HERDR_GITUI_CALLER_AGENT=claude"),
         "{open}"
     );
+    // Empty settings dir: missing config.toml is silent defaults, so the
+    // argv keeps the default `--placement tab` with no `--direction`.
+    assert_default_layout_argv(&open);
     assert!(open.ends_with("--focus"), "{open}");
     assert!(logged.contains("tab focus tab-stub"), "{logged}");
+}
+
+#[test]
+fn action_split_down_passes_placement_and_direction() {
+    let fx = Fixture::new("split-down");
+    let (out, logged) = launch_with_config(&fx, "placement = \"split\"\ndirection = \"down\"\n");
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("herdr-gitui: warning:"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    let open = sole_open_line(&logged);
+    // "Split placement with explicit direction": the direction pair sits
+    // immediately after the placement value, `--target-pane` follows it, and
+    // the pane-anchored open carries no `--workspace` despite ws-1 resolving.
+    assert!(
+        open.contains("--placement split --direction down --target-pane p1 --cwd"),
+        "{open}"
+    );
+    assert_eq!(open.matches("--placement").count(), 1, "{open}");
+    assert_eq!(open.matches("--direction").count(), 1, "{open}");
+    assert!(!open.contains("--workspace"), "{open}");
+    assert!(open.ends_with("--focus"), "{open}");
+    // Focus is not configurable: the tab re-assert still follows a split open.
+    assert!(logged.contains("tab focus tab-stub"), "{logged}");
+}
+
+#[test]
+fn action_split_auto_omits_direction_flag() {
+    let fx = Fixture::new("split-auto");
+    let (out, logged) = launch_with_config(&fx, "placement = \"split\"\ndirection = \"auto\"\n");
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let open = sole_open_line(&logged);
+    // "Split placement with auto direction": placement applies, the flag is
+    // absent entirely, and `--target-pane` sits directly after the placement
+    // value with no `--workspace`.
+    assert!(
+        open.contains("--placement split --target-pane p1 --cwd"),
+        "{open}"
+    );
+    assert!(!open.contains("--direction"), "{open}");
+    assert!(!open.contains("--workspace"), "{open}");
+    assert!(open.ends_with("--focus"), "{open}");
+}
+
+#[test]
+fn action_split_omitted_direction_defaults_to_right() {
+    let fx = Fixture::new("split-dir-omitted");
+    let (out, logged) = launch_with_config(&fx, "placement = \"split\"\n");
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let open = sole_open_line(&logged);
+    // A missing `direction` key keeps its documented default `right`, so the
+    // argv carries the flag even though the config never mentions it, and the
+    // split open is pane-anchored without `--workspace`.
+    assert!(
+        open.contains("--placement split --direction right --target-pane p1 --cwd"),
+        "{open}"
+    );
+    assert!(!open.contains("--workspace"), "{open}");
+    assert!(open.ends_with("--focus"), "{open}");
+}
+
+#[test]
+fn action_split_targets_caller_pane_and_keeps_env_tail() {
+    // "Split targets the caller pane": `--target-pane <caller-pane>` sits
+    // immediately after the direction position and the resolved workspace id
+    // is not passed; the --cwd/--env/--focus tail is byte-for-byte the tab
+    // tail.
+    let fx = Fixture::new("split-target");
+    let (out, logged) = launch_with_config(&fx, "placement = \"split\"\ndirection = \"down\"\n");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("herdr-gitui: warning"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    let open = sole_open_line(&logged);
+    assert!(
+        open.contains("--placement split --direction down --target-pane p1 --cwd "),
+        "{open}"
+    );
+    assert!(!open.contains("--workspace"), "{open}");
+    assert!(
+        open.contains("--env HERDR_GITUI_CALLER_PANE=p1")
+            && open.ends_with("--env HERDR_GITUI_CALLER_AGENT=claude --focus"),
+        "{open}"
+    );
+}
+
+#[test]
+fn action_zoomed_targets_caller_pane_without_workspace() {
+    // "Zoomed targets the caller pane": `--target-pane` directly after the
+    // placement value — no direction, no workspace.
+    let fx = Fixture::new("zoomed-target");
+    let (out, logged) = launch_with_config(&fx, "placement = \"zoomed\"\n");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("herdr-gitui: warning"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    let open = sole_open_line(&logged);
+    assert!(
+        open.contains("--placement zoomed --target-pane p1 --cwd "),
+        "{open}"
+    );
+    assert!(!open.contains("--direction"), "{open}");
+    assert!(!open.contains("--workspace"), "{open}");
+    assert!(open.ends_with("--focus"), "{open}");
+}
+
+#[test]
+fn action_overlay_omits_workspace_and_target() {
+    // "Overlay omits workspace targeting": the daemon anchors the overlay to
+    // the active pane itself; the plugin passes neither targeting flag even
+    // though both workspace `ws-1` and caller pane `p1` resolve.
+    let fx = Fixture::new("overlay-no-target");
+    let (out, logged) = launch_with_config(&fx, "placement = \"overlay\"\n");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("herdr-gitui: warning"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    let open = sole_open_line(&logged);
+    assert!(open.contains("--placement overlay --cwd "), "{open}");
+    assert!(!open.contains("--workspace"), "{open}");
+    assert!(!open.contains("--target-pane"), "{open}");
+    assert!(open.ends_with("--focus"), "{open}");
+}
+
+#[test]
+fn action_split_without_caller_pane_falls_back_to_tab() {
+    // "Unresolvable caller pane falls back to tab with warning": the context
+    // resolves workspace ws-1 but no focused pane and no HERDR_PANE_ID is in
+    // the environment, so the split request degrades to the exact tab argv —
+    // with --workspace back — plus a stderr warning, and the action succeeds.
+    let fx = Fixture::new("split-no-caller");
+    let repo = fx.subdir("repo");
+    let cfg = config_fixture(
+        &fx,
+        "config",
+        Some("placement = \"split\"\ndirection = \"down\"\n"),
+    );
+    let (herdr, _gitui, log) = fx.stubs();
+    let ctx = format!(
+        r#"{{"workspace_id":"ws-1","focused_pane_agent":"claude","worktree":{{"checkout_path":"{}"}}}}"#,
+        repo.display()
+    );
+    let out = run_plugin(&action_env(&ctx, &herdr, &log, Some(&cfg)));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("herdr-gitui: warning:") && err.contains("falling back to placement tab"),
+        "stderr: {err}"
+    );
+    let open = sole_open_line(&read_log(&log));
+    assert!(
+        open.contains("--placement tab --workspace ws-1 --cwd "),
+        "{open}"
+    );
+    assert!(!open.contains("--direction"), "{open}");
+    assert!(!open.contains("--target-pane"), "{open}");
+    assert!(open.ends_with("--focus"), "{open}");
+}
+
+#[test]
+fn action_direction_ignored_for_non_split_placements() {
+    let fx = Fixture::new("nonsplit-direction");
+    let repo = fx.subdir("repo");
+    let cfg = config_fixture(
+        &fx,
+        "config",
+        Some("placement = \"overlay\"\ndirection = \"down\"\n"),
+    );
+    let (herdr, _gitui, log) = fx.stubs();
+    let ctx = action_ctx(&repo);
+    let env = action_env(&ctx, &herdr, &log, Some(&cfg));
+
+    let out = run_plugin(&env);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    // "silently ignored (no warning)" (design.md): the ignored direction must
+    // not add any settings warning to stderr.
+    assert!(
+        !stderr(&out).contains("herdr-gitui: warning:"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    fs::write(
+        cfg.join("config.toml"),
+        "placement = \"zoomed\"\ndirection = \"down\"\n",
+    )
+    .unwrap();
+    let out = run_plugin(&env);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("herdr-gitui: warning:"),
+        "stderr: {}",
+        stderr(&out)
+    );
+
+    // "Direction ignored for non-split": overlay and zoomed both keep the
+    // placement and drop --direction; every launch ends with --focus. Both
+    // are pane-anchored (no --workspace despite ws-1 resolving) and only
+    // zoomed carries --target-pane.
+    let lines = open_lines(&read_log(&log));
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    for (line, placement) in [(&lines[0], "overlay"), (&lines[1], "zoomed")] {
+        assert!(line.contains(&format!("--placement {placement}")), "{line}");
+        assert!(!line.contains("--direction"), "{line}");
+        assert!(!line.contains("--workspace"), "{line}");
+        assert_eq!(
+            line.contains("--target-pane p1"),
+            placement == "zoomed",
+            "{line}"
+        );
+        assert!(line.ends_with("--focus"), "{line}");
+    }
+}
+
+#[test]
+fn action_late_edit_applies_next_launch() {
+    let fx = Fixture::new("late-edit");
+    let repo = fx.subdir("repo");
+    let cfg = config_fixture(&fx, "config", Some("placement = \"split\"\n"));
+    let (herdr, _gitui, log) = fx.stubs();
+    let ctx = action_ctx(&repo);
+    let env = action_env(&ctx, &herdr, &log, Some(&cfg));
+
+    // "Late edit does not affect the running session": settings load once per
+    // launch, so rewriting config.toml between launches changes only the
+    // second launch's argv.
+    let out = run_plugin(&env);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    fs::write(cfg.join("config.toml"), "placement = \"overlay\"\n").unwrap();
+    let out = run_plugin(&env);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+
+    let lines = open_lines(&read_log(&log));
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    assert!(
+        lines[0].contains("--placement split --direction right --target-pane p1"),
+        "{}",
+        lines[0]
+    );
+    assert!(!lines[0].contains("--workspace"), "{}", lines[0]);
+    assert!(lines[1].contains("--placement overlay"), "{}", lines[1]);
+    assert!(!lines[1].contains("--direction"), "{}", lines[1]);
+    assert!(!lines[1].contains("--workspace"), "{}", lines[1]);
+    assert!(!lines[1].contains("--target-pane"), "{}", lines[1]);
+}
+
+#[test]
+fn action_corrupt_toml_warns_and_opens_with_defaults() {
+    let fx = Fixture::new("corrupt-toml");
+    let (out, logged) = launch_with_config(&fx, "placement = ");
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("herdr-gitui: warning:") && err.contains("invalid config.toml"),
+        "stderr: {err}"
+    );
+    // "Corrupt TOML": all defaults, so --placement tab and no --direction.
+    assert_default_layout_argv(&sole_open_line(&logged));
+}
+
+#[test]
+fn action_unknown_key_warns_and_known_keys_apply() {
+    let fx = Fixture::new("unknown-key");
+    let (out, logged) = launch_with_config(&fx, "focus = false\nplacement = \"split\"\n");
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("herdr-gitui: warning:") && err.contains("unknown key"),
+        "stderr: {err}"
+    );
+    assert!(err.contains("focus"), "stderr: {err}");
+    // The known key keeps its effect; the omitted direction defaults right;
+    // the split open targets the caller pane and omits --workspace.
+    let open = sole_open_line(&logged);
+    assert!(
+        open.contains("--placement split --direction right --target-pane p1 --cwd"),
+        "{open}"
+    );
+    assert!(!open.contains("--workspace"), "{open}");
+    assert!(open.ends_with("--focus"), "{open}");
+}
+
+#[test]
+fn action_invalid_placement_falls_back_per_key() {
+    let fx = Fixture::new("invalid-placement");
+    let (out, logged) = launch_with_config(&fx, "placement = \"zigzag\"\ndirection = \"down\"\n");
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("herdr-gitui: warning:")
+            && err.contains("invalid placement")
+            && err.contains("zigzag"),
+        "stderr: {err}"
+    );
+    // "Invalid value falls back per key": default placement tab, and the
+    // still-valid direction has no effect for a non-split placement, so the
+    // argv carries no --direction.
+    assert_default_layout_argv(&sole_open_line(&logged));
+}
+
+#[test]
+fn action_config_dir_query_failure_warns_and_uses_defaults() {
+    let fx = Fixture::new("query-fail");
+    let repo = fx.subdir("repo");
+    let (herdr, _gitui, log) = fx.stubs();
+    let ctx = action_ctx(&repo);
+
+    // HERDR_BIN_PATH present but the query exits non-zero.
+    let mut env = action_env(&ctx, &herdr, &log, None);
+    env.push(("STUB_CONFIG_DIR_FAIL", "1"));
+    let out = run_plugin(&env);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("herdr-gitui: warning:") && err.contains("config directory unavailable"),
+        "stderr: {err}"
+    );
+    let logged = read_log(&log);
+    assert!(logged.contains("plugin config-dir gitui"), "{logged}");
+    assert_default_layout_argv(&sole_open_line(&logged));
+
+    // Same degradation on a blank (zero-exit, empty-stdout) reply; a second
+    // log keeps the one-line assertions above meaningful.
+    let log2 = fx.dir.join("stub2.log");
+    let env = action_env(&ctx, &herdr, &log2, None);
+    let out = run_plugin(&env);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("herdr-gitui: warning:") && err.contains("config directory unavailable"),
+        "stderr: {err}"
+    );
+    let logged = read_log(&log2);
+    assert!(logged.contains("plugin config-dir gitui"), "{logged}");
+    assert_default_layout_argv(&sole_open_line(&logged));
+}
+
+#[test]
+fn action_without_bin_path_degrades_without_callback() {
+    let fx = Fixture::new("no-bin-path");
+    let repo = fx.subdir("repo");
+    let (_herdr, _gitui, log) = fx.stubs();
+    let ctx = action_ctx(&repo);
+
+    // "Config-dir query passes through the same guard": with no
+    // HERDR_PLUGIN_CONFIG_DIR and no usable HERDR_BIN_PATH the settings layer
+    // must not attempt any callback; it warns and the action continues to the
+    // unchanged pane-open contract error.
+    let env = vec![
+        ("HERDR_PLUGIN_ACTION_ID", "open"),
+        ("HERDR_PLUGIN_CONTEXT_JSON", ctx.as_str()),
+        ("STUB_LOG", log.to_str().unwrap()),
+    ];
+    let out = run_plugin(&env);
+    assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("herdr-gitui: warning:") && err.contains("config directory unavailable"),
+        "stderr: {err}"
+    );
+    assert!(
+        err.contains("herdr did not provide HERDR_BIN_PATH (plugin API v1 contract); cannot call back into herdr"),
+        "stderr: {err}"
+    );
+    assert!(
+        !read_log(&log).contains("plugin config-dir"),
+        "stub was invoked"
+    );
+
+    // A whitespace-only HERDR_BIN_PATH is rejected identically.
+    let log2 = fx.dir.join("stub2.log");
+    let mut env = vec![
+        ("HERDR_PLUGIN_ACTION_ID", "open"),
+        ("HERDR_PLUGIN_CONTEXT_JSON", ctx.as_str()),
+        ("STUB_LOG", log2.to_str().unwrap()),
+    ];
+    env.push(("HERDR_BIN_PATH", "   "));
+    let out = run_plugin(&env);
+    assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("herdr-gitui: warning:") && err.contains("config directory unavailable"),
+        "stderr: {err}"
+    );
+    assert!(
+        err.contains("herdr did not provide HERDR_BIN_PATH (plugin API v1 contract); cannot call back into herdr"),
+        "stderr: {err}"
+    );
+    assert!(
+        !read_log(&log2).contains("plugin config-dir"),
+        "stub was invoked"
+    );
+}
+
+#[test]
+fn action_config_dir_env_preferred_over_callback() {
+    let fx = Fixture::new("cfg-env-preferred");
+    let repo = fx.subdir("repo");
+    let cfg = config_fixture(&fx, "config", Some("placement = \"split\"\n"));
+    // A decoy dir the callback would report: reading it would change argv.
+    let decoy = config_fixture(&fx, "decoy", Some("placement = \"zoomed\"\n"));
+    let (herdr, _gitui, log) = fx.stubs();
+    let ctx = action_ctx(&repo);
+
+    let mut env = action_env(&ctx, &herdr, &log, Some(&cfg));
+    env.push(("STUB_CONFIG_DIR", decoy.to_str().unwrap()));
+    let out = run_plugin(&env);
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("herdr-gitui: warning:"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    let logged = read_log(&log);
+    // "Environment variable preferred": no callback at all, and the env dir's
+    // values (split, not the decoy's zoomed) are applied.
+    assert!(!logged.contains("plugin config-dir"), "{logged}");
+    let open = sole_open_line(&logged);
+    assert!(
+        open.contains("--placement split --direction right --target-pane p1 --cwd"),
+        "{open}"
+    );
+    assert!(!open.contains("--workspace"), "{open}");
+    assert!(open.ends_with("--focus"), "{open}");
+}
+
+#[test]
+fn action_config_dir_cli_fallback_when_env_absent() {
+    let fx = Fixture::new("cli-fallback");
+    let repo = fx.subdir("repo");
+    let reported = config_fixture(&fx, "reported", Some("placement = \"zoomed\"\n"));
+    let (herdr, _gitui, log) = fx.stubs();
+    let ctx = action_ctx(&repo);
+
+    // "CLI fallback when env absent": unset HERDR_PLUGIN_CONFIG_DIR (the
+    // harness env_clear()s the parent env) makes the query, and the reported
+    // directory is the one config.toml is read from.
+    let mut env = action_env(&ctx, &herdr, &log, None);
+    env.push(("STUB_CONFIG_DIR", reported.to_str().unwrap()));
+    let out = run_plugin(&env);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("herdr-gitui: warning:"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    let logged = read_log(&log);
+    assert!(logged.contains("plugin config-dir gitui"), "{logged}");
+    let open = sole_open_line(&logged);
+    // Zoomed from the reported dir: anchored on the caller pane, workspace
+    // targeting omitted despite ws-1 resolving.
+    assert!(
+        open.contains("--placement zoomed --target-pane p1"),
+        "{open}"
+    );
+    assert!(!open.contains("--direction"), "{open}");
+    assert!(!open.contains("--workspace"), "{open}");
+    assert!(open.ends_with("--focus"), "{open}");
+
+    // A blank env value falls back to the same callback path.
+    let log2 = fx.dir.join("stub2.log");
+    let mut env = action_env(&ctx, &herdr, &log2, None);
+    env.push(("HERDR_PLUGIN_CONFIG_DIR", "   "));
+    env.push(("STUB_CONFIG_DIR", reported.to_str().unwrap()));
+    let out = run_plugin(&env);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let logged = read_log(&log2);
+    assert!(logged.contains("plugin config-dir gitui"), "{logged}");
+    assert!(
+        sole_open_line(&logged).contains("--placement zoomed"),
+        "{logged}"
+    );
+}
+
+/// The popup pane-open reply live-verified on herdr 0.9.5: `ok` with no
+/// pane id and no tab id (a popup is a singleton session resource, not a
+/// Herdr pane).
+const POPUP_OK_REPLY: &str = r#"{"id":"cli:plugin","result":{"type":"ok"}}"#;
+
+/// One action launch with popup settings and the id-less popup reply from
+/// the stub; returns the plugin output, the stub log, and the repo dir (the
+/// argv assertions quote its path).
+fn launch_popup_with_config(fx: &Fixture, tag: &str, content: &str) -> (Output, String, PathBuf) {
+    let repo = fx.subdir(&format!("repo-{tag}"));
+    let cfg = config_fixture(fx, &format!("config-{tag}"), Some(content));
+    let (herdr, _gitui, log) = fx.stubs();
+    let ctx = action_ctx(&repo);
+    let mut env = action_env(&ctx, &herdr, &log, Some(&cfg));
+    env.push(("STUB_PANE_OPEN", POPUP_OK_REPLY));
+    let out = run_plugin(&env);
+    (out, read_log(&log), repo)
+}
+
+#[test]
+fn action_popup_passes_size_flags_and_placement_env() {
+    // "Popup passes size flags": `--width 80 --height 80%` sit immediately
+    // after `--placement popup`, the popup-only env export follows the DIR
+    // pair, and none of the targeting flags appear despite `ws-1`/`p1`
+    // resolving and a default direction of right.
+    let fx = Fixture::new("popup-size");
+    let (out, logged, repo) = launch_popup_with_config(
+        &fx,
+        "size",
+        "placement = \"popup\"\nwidth = 80\nheight = \"80%\"\n",
+    );
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("herdr-gitui: warning:"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    let open = sole_open_line(&logged);
+    assert!(
+        open.contains(&format!(
+            "--placement popup --width 80 --height 80% --cwd {} \
+             --env HERDR_GITUI_DIR={} --env HERDR_GITUI_PLACEMENT=popup \
+             --env HERDR_GITUI_CALLER_PANE=p1",
+            repo.display(),
+            repo.display()
+        )),
+        "{open}"
+    );
+    assert!(!open.contains("--workspace"), "{open}");
+    assert!(!open.contains("--target-pane"), "{open}");
+    assert!(!open.contains("--direction"), "{open}");
+    assert!(
+        open.ends_with("--env HERDR_GITUI_CALLER_AGENT=claude --focus"),
+        "{open}"
+    );
+}
+
+#[test]
+fn action_popup_width_only_emits_no_height_flag() {
+    // Each size pair is emitted independently: an omitted `height` (invalid
+    // values are the settings layer's case) adds no `--height` token.
+    let fx = Fixture::new("popup-width-only");
+    let (out, logged, _repo) =
+        launch_popup_with_config(&fx, "width", "placement = \"popup\"\nwidth = 80\n");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let open = sole_open_line(&logged);
+    assert!(
+        open.contains("--placement popup --width 80 --cwd "),
+        "{open}"
+    );
+    assert!(!open.contains("--height"), "{open}");
+    assert!(open.contains("--env HERDR_GITUI_PLACEMENT=popup"), "{open}");
+    assert!(open.ends_with("--focus"), "{open}");
+}
+
+#[test]
+fn action_popup_without_size_keys_and_opens_without_pane_id_reply() {
+    // No size keys: no size tokens at all (herdr's default half-size popup)
+    // and no warning. The id-less `ok` reply is success: the popup notice
+    // appears, exit is 0, and no `tab focus` call is logged.
+    let fx = Fixture::new("popup-no-size");
+    let (out, logged, _repo) = launch_popup_with_config(&fx, "nosize", "placement = \"popup\"\n");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("herdr-gitui: opened gitui popup"),
+        "stderr: {err}"
+    );
+    assert!(!err.contains("pane-stub"), "stderr: {err}");
+    assert!(!err.contains("herdr-gitui: warning:"), "stderr: {err}");
+    let open = sole_open_line(&logged);
+    assert!(open.contains("--placement popup --cwd "), "{open}");
+    assert!(!open.contains("--width"), "{open}");
+    assert!(!open.contains("--height"), "{open}");
+    assert!(open.contains("--env HERDR_GITUI_PLACEMENT=popup"), "{open}");
+    assert!(open.ends_with("--focus"), "{open}");
+    assert!(!logged.contains("tab focus"), "{logged}");
+}
+
+#[test]
+fn action_size_keys_ignored_for_tab_placement() {
+    // "Size keys ignored for non-popup placements": `width`/`height` with
+    // `placement = "tab"` warn nothing and add no flags — the default argv
+    // is byte-identical and no placement env export appears.
+    let fx = Fixture::new("tab-sizes");
+    let (out, logged) =
+        launch_with_config(&fx, "placement = \"tab\"\nwidth = 80\nheight = \"80%\"\n");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("herdr-gitui: warning:"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    let open = sole_open_line(&logged);
+    assert_default_layout_argv(&open);
+    assert!(!open.contains("--width"), "{open}");
+    assert!(!open.contains("--height"), "{open}");
+    assert!(!open.contains("HERDR_GITUI_PLACEMENT"), "{open}");
+}
+
+#[test]
+fn popup_session_delivers_summary_with_zero_close_calls() {
+    // "Popup session makes no close call": delivery is unchanged, but the
+    // teardown gate makes zero `plugin pane close` and zero `tab close`
+    // calls — the popup's carried context points at the caller's agent pane.
+    let fx = Fixture::new("popup-session");
+    let repo = fx.subdir("repo");
+    clean_repo(&repo);
+    let (herdr, gitui, log) = fx.stubs();
+    let state = fx.subdir("state");
+
+    // Script that commits a file between snapshots.
+    let script = fx.dir.join("popup_commit_script.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncd '{}'\necho 'hello' > new.txt\ngit -c user.name=t -c user.email=t@example.com \
+             --no-pager add new.txt\ngit -c user.name=t -c user.email=t@example.com \
+             --no-pager commit -q -m 'add new file'\n",
+            repo.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let path = combined_path(gitui.parent().unwrap());
+    let mut env = pane_env(&repo, &state, &herdr, &log, &path);
+    env.extend([
+        ("HERDR_GITUI_CALLER_PANE", "caller-1"),
+        ("HERDR_GITUI_CALLER_AGENT", "claude"),
+        ("HERDR_GITUI_PLACEMENT", "popup"),
+        ("GITUI_SCRIPT", script.to_str().unwrap()),
+    ]);
+    let out = run_plugin(&env);
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("sent session summary to agent pane caller-1"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    let logged = read_log(&log);
+    assert!(
+        logged.contains("agent prompt caller-1 gitui session summary:"),
+        "{logged}"
+    );
+    assert!(
+        !logged.contains("plugin pane close"),
+        "popup teardown must not close the caller pane: {logged}"
+    );
+    assert!(!logged.contains("tab close"), "{logged}");
+    // Delivery cleanup is unchanged: the summary file was removed.
+    assert!(txt_files(&state.join("sessions")).is_empty());
 }
 
 #[test]

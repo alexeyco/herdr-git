@@ -20,6 +20,7 @@ use crate::context;
 use crate::git;
 use crate::gitui;
 use crate::herdr;
+use crate::settings;
 use crate::summary::{self, CommitLine, GitQueries};
 
 /// Printed before blocking on stdin so an auto-closing plugin pane stays open
@@ -101,6 +102,12 @@ pub(crate) fn run_action() -> Result<(), String> {
         })?;
     let ctx = context::parse(&json)?;
 
+    // Read the pane layout settings exactly once per action launch, before
+    // the pane open. `Settings::load` never fails: every config error is
+    // already degraded to defaults plus stderr warnings inside it, so no
+    // config problem can abort the action here. Pane mode reads no config.
+    let settings = settings::Settings::load();
+
     let workspace_id = ctx
         .workspace_id
         .or_else(|| env_non_blank("HERDR_WORKSPACE_ID"));
@@ -109,21 +116,34 @@ pub(crate) fn run_action() -> Result<(), String> {
         .or_else(|| env_non_blank("HERDR_PANE_ID"));
     let focused_pane_agent = ctx.focused_pane_agent;
 
-    let (pane_id, tab_id) = herdr::plugin_pane_open(
+    let popup_size = herdr::PopupSize {
+        width: settings.width.as_deref(),
+        height: settings.height.as_deref(),
+    };
+    let reply = herdr::plugin_pane_open(
+        settings.placement,
+        settings.direction,
+        popup_size,
         workspace_id.as_deref(),
         &ctx.dir,
         focused_pane_id.as_deref(),
         focused_pane_agent.as_deref(),
     )?;
-    match &tab_id {
-        Some(tab) => {
-            eprintln!("herdr-gitui: opened gitui pane {pane_id} in tab {tab}");
-            // Defensive: re-assert focus best-effort against a client-side
-            // rendering race. Errors are deliberately ignored; herdr already
-            // applies `--focus` at open.
-            let _ = herdr::tab_focus(tab);
-        }
-        None => eprintln!("herdr-gitui: opened gitui pane {pane_id}"),
+    match reply {
+        // A popup reply carries no pane id and no tab id: report the popup
+        // without identifiers and skip the best-effort `tab focus` re-assert
+        // — there is no tab to focus (`--focus` itself stays in the argv).
+        herdr::PaneOpen::Popup => eprintln!("herdr-gitui: opened gitui popup"),
+        herdr::PaneOpen::Pane { pane_id, tab_id } => match &tab_id {
+            Some(tab) => {
+                eprintln!("herdr-gitui: opened gitui pane {pane_id} in tab {tab}");
+                // Defensive: re-assert focus best-effort against a
+                // client-side rendering race. Errors are deliberately
+                // ignored; herdr already applies `--focus` at open.
+                let _ = herdr::tab_focus(tab);
+            }
+            None => eprintln!("herdr-gitui: opened gitui pane {pane_id}"),
+        },
     }
     Ok(())
 }
@@ -356,9 +376,16 @@ fn write_session_file(sessions_dir: &Path, summary_text: &str) -> Result<PathBuf
     Ok(path)
 }
 
-/// Best-effort pane teardown: close the pane by id, falling back to closing its
-/// tab. Failures are logged, never propagated.
+/// Best-effort pane teardown: close the pane by id, falling back to closing
+/// its tab. Failures are logged, never propagated. Popup sessions are the
+/// one gated case: the popup process carries the plugin context of the
+/// underlying tiled **caller pane**, so any close-the-own-pane call would
+/// close the user's agent pane; the popup closes naturally when this process
+/// exits (herdr-side behavior), so the teardown makes zero herdr calls.
 fn close_pane() {
+    if env_non_blank("HERDR_GITUI_PLACEMENT").as_deref() == Some("popup") {
+        return;
+    }
     if let Some(pane) = env_non_blank("HERDR_PANE_ID") {
         match herdr::pane_close(&pane) {
             Ok(()) => return,
@@ -423,7 +450,9 @@ fn state_dir() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
-fn env_non_blank(key: &str) -> Option<String> {
+/// Environment variable trimmed to a non-empty value, or `None`. Shared with
+/// the settings layer, which reads `HERDR_PLUGIN_CONFIG_DIR` through it.
+pub(crate) fn env_non_blank(key: &str) -> Option<String> {
     std::env::var(key)
         .ok()
         .map(|v| v.trim().to_string())
