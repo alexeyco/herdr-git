@@ -17,6 +17,7 @@ mod git;
 mod gitui;
 mod herdr;
 mod session;
+mod settings;
 mod summary;
 
 fn main() {

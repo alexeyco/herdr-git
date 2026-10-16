@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.0 - Unreleased
+
+### Added
+
+- `config.toml` settings with flat keys controlling where the gitui pane opens: `placement` (`tab` default, `split`, `overlay`, `zoomed`, `popup`), `direction` (`right` default, `down`, `auto`; applied only to `split`), and popup size keys `width`/`height` (a positive integer of terminal cells or an `"N%"` string; applied only to `popup`).
+- Config-directory resolution: `HERDR_PLUGIN_CONFIG_DIR` when set, otherwise a guarded `herdr plugin config-dir gitui` callback; when neither yields a directory the action continues with defaults and a warning visible via `herdr plugin log list`.
+- Degradation policy: a missing file means defaults silently; corrupt TOML, an unreadable file, or an invalid value degrades per key with a warning; unknown keys warn without failing the action. Settings are read once per action launch.
+- `split` and `zoomed` panes target the caller pane (`--target-pane`); `--workspace` is passed only for `tab`; a `split`/`zoomed` placement with no resolvable caller pane falls back to `tab` with a warning.
+- `popup` placement: a centered session-modal gitui window that leaves the tiled layout untouched, sized by `width`/`height` (herdr default half-size when unset), with no pane-close calls at teardown and summary delivery unchanged.
+
 ## 0.1.0 - 2026-10-13
 
 ### Added
