@@ -8,7 +8,11 @@ use crate::settings::{Direction, Placement};
 
 /// Runs the herdr binary with `args`, returning stdout on success.
 fn exec(args: &[&str]) -> Result<String, String> {
-    let bin = herdr_bin()?;
+    exec_with_bin(args, herdr_bin())
+}
+
+fn exec_with_bin(args: &[&str], bin: Result<String, String>) -> Result<String, String> {
+    let bin = bin?;
     let output = Command::new(&bin)
         .args(args)
         .output()
@@ -28,8 +32,12 @@ fn exec(args: &[&str]) -> Result<String, String> {
 }
 
 fn herdr_bin() -> Result<String, String> {
-    match std::env::var("HERDR_BIN_PATH") {
-        Ok(v) if !v.trim().is_empty() => Ok(v),
+    herdr_bin_from(std::env::var("HERDR_BIN_PATH").ok().as_deref())
+}
+
+fn herdr_bin_from(value: Option<&str>) -> Result<String, String> {
+    match value {
+        Some(v) if !v.trim().is_empty() => Ok(v.to_string()),
         _ => Err(
             "herdr did not provide HERDR_BIN_PATH (plugin API v1 contract); cannot call back into herdr"
                 .to_string(),
@@ -76,7 +84,7 @@ pub(crate) fn plugin_pane_open(
     parse_pane_open(&out, placement)
 }
 
-/// Queries the plugin config directory with `herdr plugin config-dir gitui`.
+/// Queries the plugin config directory with `herdr plugin config-dir alexeyco.gitui`.
 /// The reply is a bare path line (confirmed on herdr 0.9.5), not a JSON
 /// envelope, so nothing is parsed beyond trimming stdout: a single non-blank
 /// line is the directory. A blank reply, a multi-line reply, or a failed
@@ -84,7 +92,7 @@ pub(crate) fn plugin_pane_open(
 /// settings layer maps to a "config directory unavailable" warning plus
 /// defaults — never an action failure.
 pub(crate) fn plugin_config_dir() -> Result<String, String> {
-    let out = exec(&["plugin", "config-dir", "gitui"])?;
+    let out = exec(&["plugin", "config-dir", "alexeyco.gitui"])?;
     parse_config_dir(&out)
 }
 
@@ -147,7 +155,7 @@ fn placement_value(placement: Placement) -> &'static str {
 }
 
 /// `herdr plugin pane open` argv in a fixed order: `plugin pane open`,
-/// `--plugin gitui`, `--entrypoint open`, the config-driven
+/// `--plugin alexeyco.gitui`, `--entrypoint open`, the config-driven
 /// `--placement <value>`, `--width <v>`/`--height <v>` immediately after the
 /// placement value only for `popup` with the corresponding valid size
 /// setting (each pair independently, values verbatim), `--direction
@@ -196,7 +204,7 @@ pub(crate) fn pane_open_args(
         "pane".to_string(),
         "open".to_string(),
         "--plugin".to_string(),
-        "gitui".to_string(),
+        "alexeyco.gitui".to_string(),
         "--entrypoint".to_string(),
         "open".to_string(),
         // The manifest stays `placement = "tab"`: that value is declarative
@@ -337,9 +345,13 @@ pub(crate) fn tab_focus_args(tab_id: &str) -> Vec<String> {
 /// Focuses a tab by id. Used as a best-effort re-assert after opening the
 /// gitui pane; herdr already applies `--focus` at open.
 pub(crate) fn tab_focus(tab_id: &str) -> Result<String, String> {
+    tab_focus_with_bin(tab_id, herdr_bin())
+}
+
+fn tab_focus_with_bin(tab_id: &str, bin: Result<String, String>) -> Result<String, String> {
     let args = tab_focus_args(tab_id);
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    exec(&refs)
+    exec_with_bin(&refs, bin)
 }
 
 /// Submits `text` to the agent hosted in `target_pane`.
@@ -361,7 +373,7 @@ mod tests {
     use super::*;
 
     const PANE_OPEN: &str = concat!(
-        r#"{"ok":true,"result":{"plugin_pane":{"plugin_id":"gitui","entrypoint":"open","#,
+        r#"{"ok":true,"result":{"plugin_pane":{"plugin_id":"alexeyco.gitui","entrypoint":"open","#,
         r#""pane":{"pane_id":"pane-1","tab_id":"tab-1","workspace_id":"ws-1","cwd":"/repo"}}}}"#
     );
     /// The popup reply verified live on herdr 0.9.5: no pane id, no tab id.
@@ -477,7 +489,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.gitui",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -516,7 +528,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.gitui",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -549,7 +561,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.gitui",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -586,7 +598,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.gitui",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -628,7 +640,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.gitui",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -671,7 +683,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.gitui",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -712,7 +724,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.gitui",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -755,7 +767,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.gitui",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -799,7 +811,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.gitui",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -848,7 +860,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.gitui",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -952,7 +964,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.gitui",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -991,7 +1003,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.gitui",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -1052,6 +1064,15 @@ mod tests {
         let args = tab_focus_args("tab-1");
         let got: Vec<&str> = args.iter().map(String::as_str).collect();
         assert_eq!(got, ["tab", "focus", "tab-1"]);
+    }
+
+    #[test]
+    fn tab_focus_uses_the_shared_bin_path_guard() {
+        let expected = "herdr did not provide HERDR_BIN_PATH (plugin API v1 contract); cannot call back into herdr";
+        for value in [None, Some("   ")] {
+            let err = tab_focus_with_bin("tab-1", herdr_bin_from(value)).unwrap_err();
+            assert_eq!(err, expected);
+        }
     }
 
     #[test]

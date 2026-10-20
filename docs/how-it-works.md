@@ -1,8 +1,8 @@
 # How it works
 
-The `gitui.open` action is a small Rust program (sources under `src/`) that runs in two modes.
+The `alexeyco.gitui.open` action is a small Rust program (sources under `src/`) that runs in two modes.
 
-- **Action mode** runs when herdr invokes the `gitui.open` action. herdr sets `HERDR_PLUGIN_ACTION_ID` and `HERDR_PLUGIN_CONTEXT_JSON`; the binary resolves a repository directory from that JSON, reads the pane settings from `config.toml`, and opens a `gitui` plugin pane (`herdr plugin pane open --placement <placement>`, default `tab`), then exits immediately.
+- **Action mode** runs when herdr invokes the `alexeyco.gitui.open` action. herdr sets `HERDR_PLUGIN_ACTION_ID` and `HERDR_PLUGIN_CONTEXT_JSON`; the binary resolves a repository directory from that JSON, reads the pane settings from `config.toml`, and opens a `gitui` plugin pane (`herdr plugin pane open --placement <placement>`, default `tab`), then exits immediately.
 - **Pane mode** runs inside the opened pane. herdr sets `HERDR_PLUGIN_ENTRYPOINT_ID`, spawns `command = ["./target/release/herdr-gitui"]` from the manifest as a process attached to the pane pty, with the pane's tty and `--cwd` set to the repository. The binary takes read-only before/after git snapshots around a gitui session and delivers an English summary of what changed to the agent pane that requested the session.
 
 Plugin pane commands are argv-exec, not send-text: the manifest `command` array is spawned directly, so there is no shell layer, no echoed command line, and the gitui TUI appears the instant the pane opens. Plugin panes also auto-close when the pane process exits, so the error and no-agent paths block on Enter before exiting.
@@ -106,11 +106,11 @@ Any git probe failure inside summary building degrades to omitting that line (wa
 ### Action mode
 
 1. Parse the context JSON, resolve the repository directory and the caller pane/agent (see [Context](#context)).
-2. Load the pane settings once from `<config-dir>/config.toml`. The config directory is `HERDR_PLUGIN_CONFIG_DIR` when it is set to a non-blank value; otherwise the action queries `herdr plugin config-dir gitui` through `HERDR_BIN_PATH` and takes the bare path line it prints. If neither yields a directory, the action proceeds with all defaults (`placement = tab`, `direction = right`, `width`/`height` unset) and warns on stderr. Settings failures are never fatal: a missing `config.toml` is silent defaults; corrupt or unreadable TOML is all defaults with one warning; an unknown key warns while known keys keep their effect; an invalid value falls back to that key's default with a warning while the other keys keep theirs (for the popup size keys that default is "unset": no flag). A loaded placement can still degrade at open time: `split`/`zoomed` without a resolvable caller pane falls back to `tab` with a warning (step 3). Warnings go to stderr and are visible via `herdr plugin log list --plugin gitui`. The file is read once per action launch, so an edit applies to the next launch, not to a running session. Pane mode reads no config.
+2. Load the pane settings once from `<config-dir>/config.toml`. The config directory is `HERDR_PLUGIN_CONFIG_DIR` when it is set to a non-blank value; otherwise the action queries `herdr plugin config-dir alexeyco.gitui` through `HERDR_BIN_PATH` and takes the bare path line it prints. If neither yields a directory, the action proceeds with all defaults (`placement = tab`, `direction = right`, `width`/`height` unset) and warns on stderr. Settings failures are never fatal: a missing `config.toml` is silent defaults; corrupt or unreadable TOML is all defaults with one warning; an unknown key warns while known keys keep their effect; an invalid value falls back to that key's default with a warning while the other keys keep theirs (for the popup size keys that default is "unset": no flag). A loaded placement can still degrade at open time: `split`/`zoomed` without a resolvable caller pane falls back to `tab` with a warning (step 3). Warnings go to stderr and are visible via `herdr plugin log list --plugin alexeyco.gitui`. The file is read once per action launch, so an edit applies to the next launch, not to a running session. Pane mode reads no config.
 3. Open the gitui pane:
 
    ```
-   herdr plugin pane open --plugin gitui --entrypoint open --placement tab \
+   herdr plugin pane open --plugin alexeyco.gitui --entrypoint open --placement tab \
      [--workspace <workspace_id>] --cwd <dir> --env HERDR_GITUI_DIR=<dir> \
      [--env HERDR_GITUI_CALLER_PANE=<focused_pane_id>] \
      [--env HERDR_GITUI_CALLER_AGENT=<focused_pane_agent>] --focus
@@ -189,8 +189,8 @@ The context is parsed by [`serde_json`](https://crates.io/crates/serde_json) int
 - **`invoked outside herdr plugin context`** — the binary was run directly, without `HERDR_PLUGIN_ACTION_ID` or `HERDR_PLUGIN_ENTRYPOINT_ID`. Invoke it through herdr.
 - **`gitui not found on PATH`** — install [gitui](https://github.com/gitui-org/gitui) and make sure the `gitui` binary is on `PATH`.
 - **Nothing delivered** — nothing changed during the gitui session. The plugin logs `no repository changes detected` and closes the pane. Make changes in gitui (commit, switch branch, push, stage files) and quit again.
-- **gitui fails to start** — the plugin resolves the gitui binary before printing anything, so a missing gitui fails with `gitui not found on PATH; install it from …` before `starting gitui` is printed. A spawn failure after the binary was found is printed alongside the `starting gitui` line. Either way the pane waits for Enter before auto-closing. Fix the cause and re-run the action; check the action side with `herdr plugin log list --plugin gitui`.
+- **gitui fails to start** — the plugin resolves the gitui binary before printing anything, so a missing gitui fails with `gitui not found on PATH; install it from …` before `starting gitui` is printed. A spawn failure after the binary was found is printed alongside the `starting gitui` line. Either way the pane waits for Enter before auto-closing. Fix the cause and re-run the action; check the action side with `herdr plugin log list --plugin alexeyco.gitui`.
 - **Summary not delivered** — the caller pane had no agent, or delivery failed. The session summary is kept under `HERDR_PLUGIN_STATE_DIR/sessions/`, and the pane waits for Enter before auto-closing. The kept path is printed. Focus an agent pane and re-run the action.
 - **`herdr did not provide HERDR_BIN_PATH (plugin API v1 contract)`** — the process was not given the herdr binary path it needs for callbacks. Run the plugin through herdr rather than directly, and check the herdr install.
 - **The action appears hung** — herdr CLI calls (`plugin pane`, `tab`, `agent`) have no timeout by design in plugin API v1, so a hung herdr daemon blocks the action; check the daemon first.
-- Action logs: `herdr plugin log list --plugin gitui`.
+- Action logs: `herdr plugin log list --plugin alexeyco.gitui`.

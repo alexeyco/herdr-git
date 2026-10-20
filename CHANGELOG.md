@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - `config.toml` settings with flat keys controlling where the gitui pane opens: `placement` (`tab` default, `split`, `overlay`, `zoomed`, `popup`), `direction` (`right` default, `down`, `auto`; applied only to `split`), and popup size keys `width`/`height` (a positive integer of terminal cells or an `"N%"` string; applied only to `popup`).
-- Config-directory resolution: `HERDR_PLUGIN_CONFIG_DIR` when set, otherwise a guarded `herdr plugin config-dir gitui` callback; when neither yields a directory the action continues with defaults and a warning visible via `herdr plugin log list`.
+- Config-directory resolution: `HERDR_PLUGIN_CONFIG_DIR` when set, otherwise a guarded `herdr plugin config-dir alexeyco.gitui` callback; when neither yields a directory the action continues with defaults and a warning visible via `herdr plugin log list`.
 - Degradation policy: a missing file means defaults silently; corrupt TOML, an unreadable file, or an invalid value degrades per key with a warning; unknown keys warn without failing the action. Settings are read once per action launch.
 - `split` and `zoomed` panes target the caller pane (`--target-pane`); `--workspace` is passed only for `tab`; a `split`/`zoomed` placement with no resolvable caller pane falls back to `tab` with a warning.
 - `popup` placement: a centered session-modal gitui window that leaves the tiled layout untouched, sized by `width`/`height` (herdr default half-size when unset), with no pane-close calls at teardown and summary delivery unchanged.
@@ -18,7 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- `gitui.open` action that opens gitui in a new herdr tab rooted at the repository, straight into the TUI (the pane process execs gitui directly, with no shell layer and no echoed command).
+- `alexeyco.gitui.open` action that opens gitui in a new herdr tab rooted at the repository, straight into the TUI (the pane process execs gitui directly, with no shell layer and no echoed command).
 - Read-only before/after git snapshots taken around the gitui session (branch, HEAD, upstream, ahead count, staged/unstaged/untracked counts). The probes never write the git index or tree.
 - English session summary delivered to the agent in the focused pane: created commits (up to 10, with short hash and subject), amend/rebase detection, reset detection, branch switch (including detached HEAD), push via ahead-count decrease, and staging deltas (increase in staged, unstaged, or untracked file counts). Nothing is sent when nothing changed.
 - Session state kept as `<pid>-<millis>.txt` under `HERDR_PLUGIN_STATE_DIR/sessions/`, written only when a summary exists, removed on successful delivery, and pruned after 7 days. Delivered prompts capped at 64 KiB on a UTF-8 boundary.

@@ -7,12 +7,12 @@ Development happens against a locally linked plugin; no GitHub install needed.
 ```
 make build                       # produces ./target/release/herdr-gitui
 herdr plugin link .              # register the working directory as a plugin
-herdr plugin action list --plugin gitui
-herdr plugin action invoke gitui.open
-herdr plugin log list --plugin gitui
+herdr plugin action list --plugin alexeyco.gitui
+herdr plugin action invoke alexeyco.gitui.open
+herdr plugin log list --plugin alexeyco.gitui
 ```
 
-`plugin link` does not run build commands, so rebuild after every source change. Unlink with `herdr plugin unlink gitui`.
+`plugin link` does not run build commands, so rebuild after every source change. Unlink with `herdr plugin unlink alexeyco.gitui`.
 
 The action calls back into herdr through `HERDR_BIN_PATH` (set by herdr), not through a bare `herdr` on `PATH`. That is the binary herdr launched, so callbacks work even when the plugin is linked.
 
@@ -54,8 +54,8 @@ Real git repos are created per test. Coverage:
 ```
 make build
 herdr plugin link .
-herdr plugin list                     # shows gitui 0.2.0
-herdr plugin action invoke gitui.open
+herdr plugin list                     # shows alexeyco.gitui 0.2.0
+herdr plugin action invoke alexeyco.gitui.open
 ```
 
 1. Bind `prefix+shift+g` in `~/.config/herdr/config.toml`:
@@ -64,7 +64,7 @@ herdr plugin action invoke gitui.open
    [[keys.command]]
    key = "prefix+shift+g"
    type = "plugin_action"
-   command = "gitui.open"
+   command = "alexeyco.gitui.open"
    ```
 
 2. Happy path: focus an agent pane, open gitui, make a commit, and quit; the summary arrives in the agent as one prompt prefixed `gitui session summary:`.
@@ -73,7 +73,7 @@ herdr plugin action invoke gitui.open
 5. Push with an upstream configured → the push is reported (ahead-count decrease).
 6. Close the `gitui` tab early → the session is cancelled; nothing is sent.
 7. Invoke the action from a pane with no agent → the summary is kept on disk, the path is printed in the plugin log, and the pane waits for Enter before closing.
-8. Inspect the log: `herdr plugin log list --plugin gitui`.
+8. Inspect the log: `herdr plugin log list --plugin alexeyco.gitui`.
 
 ## Version sync
 

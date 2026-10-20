@@ -3,7 +3,7 @@
 ## Purpose
 
 Action mode is the entry point herdr invokes for the plugin's `open` action
-(declared in `herdr-plugin.toml`: plugin id `gitui`, version `0.1.0`, action
+(declared in `herdr-plugin.toml`: plugin id `alexeyco.gitui`, version `0.1.0`, action
 id `open`, pane id `open` with `placement = "tab"`, `min_herdr_version
 "0.9.0"`, no keybindings declared). It reads the plugin context herdr passes
 as JSON, resolves the repository directory, and calls back into herdr with
@@ -14,6 +14,23 @@ action prints the new pane id and exits immediately; pane setup and the
 session itself continue in pane mode.
 
 ## Requirements
+
+### Requirement: Manifest identity defines the qualified action name
+
+The plugin manifest SHALL declare plugin id `alexeyco.gitui` and action id
+`open`, producing the qualified action identifier `alexeyco.gitui.open`.
+The action id and pane entrypoint id SHALL remain `open`; the plugin SHALL
+NOT expose `gitui.open` as an alias.
+
+#### Scenario: Qualified action is invoked
+
+- **WHEN** a Herdr setting binds `command = "alexeyco.gitui.open"` or a user runs `herdr plugin action invoke alexeyco.gitui.open`
+- **THEN** Herdr invokes the plugin's `open` action
+
+#### Scenario: Old action name is not an alias
+
+- **WHEN** a setting or invocation uses `gitui.open`
+- **THEN** this plugin does not resolve that name as an alias for `alexeyco.gitui.open`
 
 ### Requirement: Action mode requires a non-blank plugin context JSON
 
@@ -102,7 +119,7 @@ shared check guards every herdr call the plugin makes in either mode
 
 #### Scenario: Config-dir query passes through the same guard
 
-- **WHEN** the settings layer attempts the `plugin config-dir gitui` fallback query with `HERDR_BIN_PATH` missing or blank
+- **WHEN** the settings layer attempts the `plugin config-dir alexeyco.gitui` fallback query with `HERDR_BIN_PATH` missing or blank
 - **THEN** the shared check rejects that call as well, and the settings layer treats the rejection as "config directory unavailable" (a warning, not an action failure)
 
 ### Requirement: Pane open passes a fixed argv and requires a pane id in the reply
@@ -162,12 +179,12 @@ cases and raw reply snippets in errors are truncated at 200 characters
 #### Scenario: Full context
 
 - **WHEN** workspace id `W`, caller pane `P`, and caller agent `A` are all resolved for directory `D` and no placement/direction config is active (defaults)
-- **THEN** argv is exactly `plugin pane open --plugin gitui --entrypoint open --placement tab --workspace W --cwd D --env HERDR_GITUI_DIR=D --env HERDR_GITUI_CALLER_PANE=P --env HERDR_GITUI_CALLER_AGENT=A --focus`
+- **THEN** argv is exactly `plugin pane open --plugin alexeyco.gitui --entrypoint open --placement tab --workspace W --cwd D --env HERDR_GITUI_DIR=D --env HERDR_GITUI_CALLER_PANE=P --env HERDR_GITUI_CALLER_AGENT=A --focus`
 
 #### Scenario: Minimal context
 
 - **WHEN** no workspace id, caller pane, or caller agent resolved for directory `D` and no placement/direction config is active (defaults)
-- **THEN** argv is exactly `plugin pane open --plugin gitui --entrypoint open --placement tab --cwd D --env HERDR_GITUI_DIR=D --focus`
+- **THEN** argv is exactly `plugin pane open --plugin alexeyco.gitui --entrypoint open --placement tab --cwd D --env HERDR_GITUI_DIR=D --focus`
 
 #### Scenario: Split placement with explicit direction
 
@@ -207,7 +224,7 @@ cases and raw reply snippets in errors are truncated at 200 characters
 #### Scenario: Popup passes size flags
 
 - **WHEN** the effective placement is `popup` with resolved `width = 80` and `height = "80%"` for directory `D` and caller pane `P` resolved, and a workspace id `W` is resolved
-- **THEN** argv is exactly `plugin pane open --plugin gitui --entrypoint open --placement popup --width 80 --height 80% --cwd D --env HERDR_GITUI_DIR=D --env HERDR_GITUI_PLACEMENT=popup --env HERDR_GITUI_CALLER_PANE=P --focus`, with no `--workspace`, no `--target-pane`, and no `--direction` token; a width-only config (no valid `height`) is identical minus the `--height 80%` pair
+- **THEN** argv is exactly `plugin pane open --plugin alexeyco.gitui --entrypoint open --placement popup --width 80 --height 80% --cwd D --env HERDR_GITUI_DIR=D --env HERDR_GITUI_PLACEMENT=popup --env HERDR_GITUI_CALLER_PANE=P --focus`, with no `--workspace`, no `--target-pane`, and no `--direction` token; a width-only config (no valid `height`) is identical minus the `--height 80%` pair
 
 #### Scenario: Reply without pane id
 

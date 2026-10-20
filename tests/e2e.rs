@@ -281,6 +281,20 @@ fn assert_default_layout_argv(open: &str) {
     assert!(open.ends_with("--focus"), "{open}");
 }
 
+#[test]
+fn manifest_declares_qualified_action_without_legacy_plugin_id() {
+    let manifest: toml::Value = toml::from_str(include_str!("../herdr-plugin.toml")).unwrap();
+    let plugin_id = manifest["id"].as_str().unwrap();
+    let action_id = manifest["actions"][0]["id"].as_str().unwrap();
+    let pane_id = manifest["panes"][0]["id"].as_str().unwrap();
+
+    assert_eq!(plugin_id, "alexeyco.gitui");
+    assert_eq!(action_id, "open");
+    assert_eq!(pane_id, "open");
+    assert_eq!(format!("{plugin_id}.{action_id}"), "alexeyco.gitui.open");
+    assert_ne!(format!("{plugin_id}.{action_id}"), "gitui.open");
+}
+
 /// One action launch with a settings dir whose `config.toml` contains
 /// `content`; returns the plugin output and the stub log.
 fn launch_with_config(fx: &Fixture, content: &str) -> (Output, String) {
@@ -828,7 +842,10 @@ fn action_config_dir_query_failure_warns_and_uses_defaults() {
         "stderr: {err}"
     );
     let logged = read_log(&log);
-    assert!(logged.contains("plugin config-dir gitui"), "{logged}");
+    assert!(
+        logged.contains("plugin config-dir alexeyco.gitui"),
+        "{logged}"
+    );
     assert_default_layout_argv(&sole_open_line(&logged));
 
     // Same degradation on a blank (zero-exit, empty-stdout) reply; a second
@@ -843,7 +860,10 @@ fn action_config_dir_query_failure_warns_and_uses_defaults() {
         "stderr: {err}"
     );
     let logged = read_log(&log2);
-    assert!(logged.contains("plugin config-dir gitui"), "{logged}");
+    assert!(
+        logged.contains("plugin config-dir alexeyco.gitui"),
+        "{logged}"
+    );
     assert_default_layout_argv(&sole_open_line(&logged));
 }
 
@@ -958,7 +978,10 @@ fn action_config_dir_cli_fallback_when_env_absent() {
         stderr(&out)
     );
     let logged = read_log(&log);
-    assert!(logged.contains("plugin config-dir gitui"), "{logged}");
+    assert!(
+        logged.contains("plugin config-dir alexeyco.gitui"),
+        "{logged}"
+    );
     let open = sole_open_line(&logged);
     // Zoomed from the reported dir: anchored on the caller pane, workspace
     // targeting omitted despite ws-1 resolving.
@@ -978,7 +1001,10 @@ fn action_config_dir_cli_fallback_when_env_absent() {
     let out = run_plugin(&env);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     let logged = read_log(&log2);
-    assert!(logged.contains("plugin config-dir gitui"), "{logged}");
+    assert!(
+        logged.contains("plugin config-dir alexeyco.gitui"),
+        "{logged}"
+    );
     assert!(
         sole_open_line(&logged).contains("--placement zoomed"),
         "{logged}"

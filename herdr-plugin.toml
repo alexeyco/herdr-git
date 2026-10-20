@@ -1,5 +1,5 @@
 # Manifest reference: https://herdr.dev/docs/plugins/
-id = "gitui"
+id = "alexeyco.gitui"
 name = "gitui"
 version = "0.2.0"
 min_herdr_version = "0.9.0"

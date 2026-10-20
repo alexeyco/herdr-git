@@ -1,13 +1,13 @@
-## herdr-gitui
+## herdr-git
 
-[![Release](https://img.shields.io/github/v/release/alexeyco/herdr-gitui?label=release&color=blue)](https://github.com/alexeyco/herdr-gitui/releases/latest)
-[![CI](https://github.com/alexeyco/herdr-gitui/actions/workflows/ci.yml/badge.svg)](https://github.com/alexeyco/herdr-gitui/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/alexeyco/herdr-git?label=release&color=blue)](https://github.com/alexeyco/herdr-git/releases/latest)
+[![CI](https://github.com/alexeyco/herdr-git/actions/workflows/ci.yml/badge.svg)](https://github.com/alexeyco/herdr-git/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Platforms](https://img.shields.io/badge/platforms-linux%20%C2%B7%20macos-lightgrey)](https://github.com/alexeyco/herdr-gitui/releases/latest)
+[![Platforms](https://img.shields.io/badge/platforms-linux%20%C2%B7%20macos-lightgrey)](https://github.com/alexeyco/herdr-git/releases/latest)
 [![Rust 1.96.1+](https://img.shields.io/badge/rust-1.96.1%2B-blue.svg)](https://www.rust-lang.org)
 [![herdr plugin](https://img.shields.io/badge/herdr-plugin-8A2BE2)](https://herdr.dev)
 
-![herdr-gitui](assets/banner.svg)
+![herdr-git](assets/banner.svg)
 
 herdr plugin that opens [gitui](https://github.com/gitui-org/gitui) in a herdr pane and reports what the session changed to the agent.
 
@@ -21,13 +21,13 @@ One keypress opens gitui rooted at the repository; when you quit gitui after a c
 
 ## Other herdr plugins
 
-- [herdr-revdiff](https://github.com/alexeyco/herdr-revdiff) — review diffs with the revdiff TUI and deliver the resulting annotations to the agent in the focused pane.
+- [herdr-review](https://github.com/alexeyco/herdr-review) — review diffs with the human review TUI of your choice and deliver your annotations to the agent in the focused pane.
 - [herdr-open-in](https://github.com/alexeyco/herdr-open-in) — open the workspace or worktree in your editor.
 
 ## Install
 
 ```
-herdr plugin install alexeyco/herdr-gitui
+herdr plugin install alexeyco/herdr-git
 ```
 
 The installer fetches the repository, runs `cargo build --release`, and registers the plugin.
@@ -40,14 +40,14 @@ Bind a key in your herdr config:
 [[keys.command]]
 key = "prefix+shift+g"
 type = "plugin_action"
-command = "gitui.open"
+command = "alexeyco.gitui.open"
 description = "Open gitui"
 ```
 
 Or invoke the action from the CLI:
 
 ```
-herdr plugin action invoke gitui.open
+herdr plugin action invoke alexeyco.gitui.open
 ```
 
 ## Why
@@ -122,7 +122,7 @@ height = "80%"
 
 Settings are read once per action launch, so an edit takes effect on the next launch. The plugin never fails over its settings: a missing `config.toml` silently means defaults, while a corrupt file, an unknown key, or an invalid value degrades to the defaults for that key with a warning you can see via `herdr plugin log list`. Focus is not configurable: the pane always opens focused.
 
-The file lives in the plugin's config directory: herdr injects its location as `HERDR_PLUGIN_CONFIG_DIR`, and `herdr plugin config-dir gitui` prints the same directory for you to edit in a shell.
+The file lives in the plugin's config directory: herdr injects its location as `HERDR_PLUGIN_CONFIG_DIR`, and `herdr plugin config-dir alexeyco.gitui` prints the same directory for you to edit in a shell.
 
 ## How it works
 
@@ -131,8 +131,8 @@ The full detection rules and lifecycle are in [docs/how-it-works.md](docs/how-it
 ## Building
 
 ```
-git clone https://github.com/alexeyco/herdr-gitui
-cd herdr-gitui
+git clone https://github.com/alexeyco/herdr-git
+cd herdr-git
 cargo build --release
 herdr plugin link .
 ```
