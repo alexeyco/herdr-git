@@ -27,7 +27,13 @@ Action mode SHALL detect executable `gitui` and `lazygit` binaries from `PATH`, 
 
 ### Requirement: Both installed tools are selected with an interactive picker
 
-When both tools are available, action mode SHALL request the `picker` popup entrypoint on every invocation, passing both canonical tool paths, the saved preference, and resolved repository and caller context. The picker SHALL list available tools, support arrow keys and `k`/`j`, Enter, and Esc or `q`, and preselect the saved choice when available. Its UI SHALL return the confirmed tool or cancellation without opening a pane.
+When both tools are available, action mode SHALL request the `picker` popup
+on every invocation, passing canonical paths, saved preference, and caller
+context. The picker SHALL list the tools, preselect an available saved
+choice, support arrows or `k`/`j`, Enter, Esc, and `q`, and return a choice
+or cancellation without opening a pane. It SHALL be borderless, 24 by 6,
+with blank rows above and below the list, no help line, reset colors, and
+reverse-video selection.
 
 #### Scenario: Picker appears for every invocation with both tools
 
@@ -52,7 +58,12 @@ When both tools are available, action mode SHALL request the `picker` popup entr
 #### Scenario: Popup placement closes picker before opening selected tool
 
 - **WHEN** both tools are available, configured placement is `popup`, and the user confirms a tool
-- **THEN** the picker uses its compact 52-column by 7-row size, publishes the tool id, closes, and the action opens the selected tool popup with configured width and height
+- **THEN** the 24-by-6 picker publishes the tool id, closes, and the action opens the selected tool popup with configured width and height
+
+#### Scenario: Picker presentation follows the terminal theme
+
+- **WHEN** the picker renders its tool rows
+- **THEN** it has no help line or border, uses reset foreground and background colors, and fills the active row with reverse video
 
 #### Scenario: User cancels the picker
 

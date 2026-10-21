@@ -8,14 +8,10 @@ Action mode is the entry point herdr invokes for the plugin's `open` action (dec
 
 ### Requirement: Manifest identity defines the qualified action name
 
-The plugin manifest SHALL declare plugin id `alexeyco.git` and action id
-`open`, producing the sole qualified action identifier
-`alexeyco.git.open`. The action id and session pane entrypoint id SHALL remain
-`open`; the manifest SHALL also declare popup pane entrypoints `picker` and
-`setup`, each handled by a distinct pane-mode flow;
-the plugin SHALL NOT expose `alexeyco.gitui.open` or `gitui.open` as aliases.
-Users SHALL configure the new action name themselves; the plugin SHALL NOT
-rewrite user configuration or provide migration behavior.
+The manifest SHALL declare plugin id `alexeyco.git`, action id `open`, and
+session pane entrypoint id `open`, making `alexeyco.git.open` its only action
+identifier. It SHALL provide separate `picker` and `setup` popup entrypoints,
+without legacy aliases or automatic user-configuration migration.
 
 #### Scenario: Qualified action is invoked
 
@@ -124,14 +120,12 @@ shared check guards every herdr call the plugin makes in either mode
 
 ### Requirement: Pane open passes a fixed argv and requires a pane id in the reply
 
-Action mode SHALL retain the existing session pane-open argv ordering,
-placement and reply handling, while using `--plugin alexeyco.git` for every
-pane-open call. The `--entrypoint open`, settings-driven placement, caller
-context, popup handling, pane-id validation, and optional tab-id behavior
-for the session pane SHALL remain unchanged. When action mode requests the
-tool picker or setup guidance, it SHALL open the corresponding `picker` or
-`setup` entrypoint with popup placement and SHALL NOT route those entrypoints
-through the `open` session pane flow.
+Action mode SHALL open session panes with the established argv ordering,
+settings-driven placement, caller context, and reply handling, using
+`--plugin alexeyco.git`. Picker and setup requests SHALL use their matching
+popup entrypoints, not the session pane flow. The picker SHALL be borderless,
+24 columns by 6 rows, with blank rows above and below the tool list, no help
+line, reset colors, and reverse-video selection.
 
 #### Scenario: Manifest declares all pane entrypoints
 
@@ -141,7 +135,7 @@ through the `open` session pane flow.
 #### Scenario: Pane mode dispatches by entrypoint id
 
 - **WHEN** Herdr starts the binary with `HERDR_PLUGIN_ENTRYPOINT_ID` set to `open`, `picker`, or `setup`
-- **THEN** `src/main.rs` dispatches respectively to the session flow, `session::run_picker()` wrapper, or separate setup flow
+- **THEN** `src/main.rs` dispatches respectively to the session flow, picker entrypoint, or separate setup flow
 
 #### Scenario: Unknown pane entrypoint fails
 
@@ -161,12 +155,17 @@ through the `open` session pane flow.
 #### Scenario: Popup picker preserves configured dimensions
 
 - **WHEN** configured placement is `popup` and width or height is set
-- **THEN** the picker uses its compact manifest dimensions, closes before a second popup opens, and the selected tool popup receives the configured size flags
+- **THEN** the picker uses its 24-by-6 dimensions, closes before a second popup opens, and the selected tool popup receives the configured size flags
 
 #### Scenario: Picker declares compact dimensions
 
 - **WHEN** the plugin manifest is loaded
-- **THEN** the `picker` popup has width `52` and height `7`, independently of user settings for the selected TUI popup
+- **THEN** the `picker` popup has width `24` and height `6`, independently of user settings for the selected TUI popup
+
+#### Scenario: Picker has no help line and reverses the selected row
+
+- **WHEN** the picker renders its tool rows
+- **THEN** it shows no help line or border, uses terminal reset colors, and highlights the active row with reverse video across the popup width
 
 #### Scenario: Picker preserves the caller tab
 
@@ -235,16 +234,10 @@ through the `open` session pane flow.
 
 ### Requirement: Success reports the pane and re-asserts tab focus best-effort
 
-On a successful non-popup open, action mode SHALL print `herdr-gitui: opened
-gitui pane {id} in tab {tab}` to stderr when a tab id was returned, or
-`herdr-gitui: opened gitui pane {id}` without the tab part otherwise; when
-a tab id exists it SHALL then run `herdr tab focus <tab>` best-effort,
-ignoring any error, and return success so the process exits 0 without
-holding (src/session.rs:118-128, src/main.rs:23-30). On a successful
-`popup` open the reply carries no pane id and no tab id, so the action
-SHALL instead print `herdr-gitui: opened gitui popup` on stderr without any
-pane or tab identifier, SHALL NOT run the best-effort `tab focus` re-assert,
-and SHALL return success so the process exits 0 without holding.
+After a successful non-popup open, action mode SHALL report the pane and any
+returned tab id, then best-effort focus that tab. After a successful popup
+open, it SHALL report the popup without identifiers and SHALL NOT focus a
+tab. Both paths SHALL return success without holding the process.
 
 #### Scenario: Open with tab
 

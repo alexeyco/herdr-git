@@ -8,14 +8,11 @@ This capability decides and executes what happens after the selected Git TUI exi
 
 ### Requirement: Session completion restores the caller tab
 
-When the session has a non-blank `HERDR_GITUI_CALLER_TAB`, the plugin SHALL
-best-effort focus that tab before closing the session pane on clean
-`NoChanges` and `Deliver` outcomes. On held `NoAgent`, `Killed`, and `Failed`
-paths, it SHALL attempt to focus the caller tab after the user releases the
-hold and before the process exits. A missing tab id or failed focus call SHALL
-not change the session outcome. Popup sessions SHALL NOT attempt tab focus.
-Popup sessions SHALL close when their TUI process exits and SHALL NOT issue a
-pane-close callback.
+For tab sessions, the plugin SHALL best-effort focus a non-blank caller tab
+before teardown on `NoChanges` and `Deliver`, and after the hold on
+`NoAgent`, `Killed`, and `Failed`. Missing tab ids or focus failures SHALL
+not change the outcome. Popup sessions SHALL NOT focus tabs or call pane
+teardown; they close when the TUI exits.
 
 #### Scenario: Clean completion returns focus before pane teardown
 
@@ -116,23 +113,11 @@ message, hold the pane, and exit with code 0 on success
 
 ### Requirement: Best-effort pane teardown
 
-The plugin's pane teardown SHALL attempt `herdr plugin pane close
-$HERDR_PANE_ID` via the herdr binary and, when that id is missing or the call
-fails, fall back to `herdr tab close $HERDR_TAB_ID`; all failures are logged
-to stderr and never propagated (src/session.rs:359-373,370-382). When the
-session runs as a popup — the pane process sees `HERDR_GITUI_PLACEMENT=popup`
-in its environment, exported by the action — the teardown SHALL make no herdr
-call at all: neither `plugin pane close` nor the tab-close fallback. A popup
-is a singleton session resource rather than a Herdr pane: its process does
-not receive `HERDR_PANE_ID` for itself, and the plugin context its
-environment carries points at the underlying tiled caller pane, so any
-close-the-own-pane call would target the user's agent pane; the popup closes
-naturally when the session process exits (herdr-side behavior). Summary
-delivery is unaffected by the popup gate because it addresses
-`HERDR_GITUI_CALLER_PANE`, not the session's own pane id. The pane hold its
-outcomes invoke is specified by the mode-dispatch capability (see "Hold waits
-for one Enter and never hangs on closed stdin"); the hold mechanism is not
-re-specified here.
+For tab sessions, teardown SHALL try to close the pane by its pane id and
+fall back to closing its tab when the pane id is missing or the call fails.
+Failures SHALL be logged and never propagated. Popup sessions SHALL make no
+teardown callback because they close when their process exits. Delivery
+continues to target the caller pane, and hold behavior follows mode-dispatch.
 
 #### Scenario: Pane close succeeds
 
@@ -161,7 +146,12 @@ re-specified here.
 
 ### Requirement: Session file location, naming, and content
 
-Session summaries SHALL continue to be stored directly under `<state-dir>/sessions/`, where state-dir is the non-blank `HERDR_PLUGIN_STATE_DIR` or the system temp directory when absent or blank. Pane start SHALL create that directory recursively and treat failure as fatal. Each file SHALL be named `<pid>-<unix millis>.txt`; its content SHALL begin with the selected tool label (`gitui session summary:` or `lazygit session summary:`) and then contain the summary produced from the read-only snapshots. The plugin SHALL never read session file contents back after writing them.
+Session summaries SHALL be stored under `<state-dir>/sessions/`, where
+state-dir is non-blank `HERDR_PLUGIN_STATE_DIR` or the system temporary
+directory. Pane start SHALL create the directory recursively and fail if it
+cannot. Files SHALL use `<pid>-<unix millis>.txt`, begin with the selected
+tool label, and contain the summary from read-only snapshots. The plugin
+SHALL NOT read the files after writing them.
 
 #### Scenario: File name carries pid and timestamp
 
