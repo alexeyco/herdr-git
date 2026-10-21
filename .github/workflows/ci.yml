@@ -21,6 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - run: sh tests/release-version-check.sh
       - name: Check Cargo.toml and herdr-plugin.toml versions match
         shell: bash
         run: |
