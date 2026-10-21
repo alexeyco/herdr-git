@@ -20,10 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Verify tag matches crate and plugin versions
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          grep -qx "version = \"$tag\"" Cargo.toml || { echo "tag $tag != Cargo.toml version"; exit 1; }
-          grep -qx "version = \"$tag\"" herdr-plugin.toml || { echo "tag $tag != herdr-plugin.toml version"; exit 1; }
+        run: sh scripts/check-release-version.sh "$GITHUB_REF_NAME"
 
   ci:
     needs: verify

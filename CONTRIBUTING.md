@@ -28,4 +28,4 @@ Format Markdown with `make fmt`; CI enforces the formatting check.
 
 ## Releases
 
-Maintainers tag `v<version>`; see [docs/development.md](docs/development.md) for the version sync rules and what the release workflow does.
+Before creating a release tag, run `make release-check TAG=v<version>` from the target commit. The check verifies that the tag version matches both `Cargo.toml` and `herdr-plugin.toml`; the release workflow runs the same check before CI or artifact creation. See [docs/development.md](docs/development.md) for the version sync rules and release workflow details.

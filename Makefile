@@ -19,7 +19,13 @@ lint: ## Run cargo fmt and clippy
 
 .PHONY: test
 test: ## Run the test suite
+	sh tests/release-version-check.sh
 	cargo test --locked
+
+.PHONY: release-check
+release-check: ## Verify TAG matches Cargo.toml and herdr-plugin.toml before tagging
+	@test -n "$(TAG)" || { echo "usage: make release-check TAG=v<version>"; exit 2; }
+	sh scripts/check-release-version.sh "$(TAG)"
 
 .PHONY: build
 build: ## Build the release binary

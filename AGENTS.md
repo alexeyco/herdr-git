@@ -5,7 +5,7 @@ See README.md for what this plugin does; docs/development.md for the dev workflo
 ## Gotchas
 
 - The binary is dual-mode: `HERDR_PLUGIN_ACTION_ID` set = action mode (opens the pane, exits), `HERDR_PLUGIN_ENTRYPOINT_ID` set = pane mode (runs gitui on the pane tty). Same binary, dispatched in `main`. Pane mode wins when both are set.
-- The version appears in `Cargo.toml` and `herdr-plugin.toml`; keep both in sync (release tags verify both, then run the full CI suite via `workflow_call` before artifacts).
+- The version appears in `Cargo.toml` and `herdr-plugin.toml`; keep both in sync. Before creating any release tag, run `make release-check TAG=v<version>` from the target commit; the release workflow runs the same check and then runs the full CI suite via `workflow_call` before artifacts.
 - Build the release binary before `herdr plugin link` testing; a linked plugin does not rebuild itself.
 - Call back into herdr through `HERDR_BIN_PATH`, never a bare `herdr`.
 - `min_herdr_version` is checked against the running herdr binary; an older local herdr refuses to link.
