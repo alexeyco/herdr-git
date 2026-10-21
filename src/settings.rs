@@ -85,7 +85,7 @@ impl Settings {
 
 /// Resolves the settings directory: a non-blank `HERDR_PLUGIN_CONFIG_DIR`
 /// wins outright and no callback is made; otherwise the HERDR_BIN_PATH-
-/// guarded `plugin config-dir alexeyco.gitui` query answers. The `Err` reason maps to
+/// guarded `plugin config-dir alexeyco.git` query answers. The `Err` reason maps to
 /// the single "config directory unavailable" warning plus defaults.
 fn resolve_config_dir() -> Result<PathBuf, String> {
     if let Some(dir) = env_non_blank("HERDR_PLUGIN_CONFIG_DIR") {

@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::context;
 use crate::git;
-use crate::gitui;
+use crate::gitui::{self, Tool};
 use crate::herdr;
 use crate::settings;
 use crate::summary::{self, CommitLine, GitQueries};
@@ -31,9 +31,6 @@ const SESSION_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Cap on the delivered agent prompt, well under ARG_MAX (1 MiB macOS / 2 MiB
 /// Linux): the summary travels as a single argv element.
 const MAX_PROMPT_BYTES: usize = 65536;
-/// Prompt header delivered to the agent.
-const PROMPT_HEADER: &str = "gitui session summary:\n\n";
-
 /// What to do with the session result.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -69,8 +66,8 @@ pub(crate) fn decide(code: Option<i32>, summary_text: &str, has_agent: bool) -> 
 }
 
 /// Prompt text sent to the agent.
-pub(crate) fn prompt_text(summary_text: &str) -> String {
-    format!("{PROMPT_HEADER}{}", summary_text.trim())
+pub(crate) fn prompt_text(tool_id: &str, summary_text: &str) -> String {
+    format!("{tool_id} session summary:\n\n{}", summary_text.trim())
 }
 
 /// Caps the delivered prompt at `max_bytes`, cutting on a UTF-8 boundary and
@@ -92,7 +89,7 @@ fn cap_prompt(text: &str, max_bytes: usize, kept_path: &Path) -> String {
     capped
 }
 
-/// Action mode: resolve the repository and open the gitui pane, then exit.
+/// Action mode: resolve available tools and open the appropriate popup or session pane.
 pub(crate) fn run_action() -> Result<(), String> {
     let json = std::env::var("HERDR_PLUGIN_CONTEXT_JSON")
         .ok()
@@ -101,12 +98,14 @@ pub(crate) fn run_action() -> Result<(), String> {
             "HERDR_PLUGIN_CONTEXT_JSON is not set; invoke this action from herdr".to_string()
         })?;
     let ctx = context::parse(&json)?;
-
-    // Read the pane layout settings exactly once per action launch, before
-    // the pane open. `Settings::load` never fails: every config error is
-    // already degraded to defaults plus stderr warnings inside it, so no
-    // config problem can abort the action here. Pane mode reads no config.
     let settings = settings::Settings::load();
+
+    let tools = gitui::find_tools()?;
+    if tools.is_empty() {
+        herdr::open_setup_popup()?;
+        eprintln!("herdr-gitui: opened tool setup popup");
+        return Ok(());
+    }
 
     let workspace_id = ctx
         .workspace_id
@@ -115,34 +114,222 @@ pub(crate) fn run_action() -> Result<(), String> {
         .focused_pane_id
         .or_else(|| env_non_blank("HERDR_PANE_ID"));
     let focused_pane_agent = ctx.focused_pane_agent;
+    let caller_tab = ctx.tab_id;
 
+    if tools.len() > 1 {
+        let last_tool = crate::state::read_last_tool();
+        let ticket = if settings.placement == settings::Placement::Popup {
+            Some(crate::state::PickerSelectionTicket::create()?)
+        } else {
+            None
+        };
+        let selection_file = ticket
+            .as_ref()
+            .map(|ticket| {
+                ticket
+                    .path()
+                    .to_str()
+                    .ok_or_else(|| "picker handoff path is not valid UTF-8".to_string())
+            })
+            .transpose()?;
+        herdr::open_picker_popup(herdr::PickerPopupRequest {
+            cwd: &ctx.dir,
+            gitui_path: tools
+                .iter()
+                .find(|tool| tool.id == "gitui")
+                .map(|tool| tool.path.as_str()),
+            lazygit_path: tools
+                .iter()
+                .find(|tool| tool.id == "lazygit")
+                .map(|tool| tool.path.as_str()),
+            last_tool,
+            workspace_id: workspace_id.as_deref(),
+            caller_pane: focused_pane_id.as_deref(),
+            caller_agent: focused_pane_agent.as_deref(),
+            caller_tab: caller_tab.as_deref(),
+            selection_file,
+        })?;
+        eprintln!("herdr-gitui: opened tool picker popup");
+        if let Some(ticket) = ticket.as_ref() {
+            return complete_popup_picker(ticket, &tools, herdr::popup_close, |tool| {
+                open_selected_tool(
+                    tool,
+                    &ctx.dir,
+                    workspace_id.as_deref(),
+                    focused_pane_id.as_deref(),
+                    focused_pane_agent.as_deref(),
+                    caller_tab.as_deref(),
+                    &settings,
+                )
+            });
+        }
+        return Ok(());
+    }
+
+    open_selected_tool(
+        &tools[0],
+        &ctx.dir,
+        workspace_id.as_deref(),
+        focused_pane_id.as_deref(),
+        focused_pane_agent.as_deref(),
+        caller_tab.as_deref(),
+        &settings,
+    )
+}
+
+fn complete_popup_picker(
+    ticket: &crate::state::PickerSelectionTicket,
+    tools: &[Tool],
+    close_popup: impl FnOnce() -> Result<(), String>,
+    open_tool: impl FnOnce(&Tool) -> Result<(), String>,
+) -> Result<(), String> {
+    let Some(tool_id) = ticket.wait()? else {
+        return Ok(());
+    };
+    close_popup()?;
+    let tool = tools
+        .iter()
+        .find(|tool| tool.id == tool_id)
+        .ok_or_else(|| format!("picker returned unavailable tool '{tool_id}'"))?;
+    open_tool(tool)
+}
+
+/// Consumes the picker result and either runs it in this popup or opens a
+/// separate configured session pane.
+pub(crate) fn run_picker() -> Result<(), String> {
+    let selection_file = env_non_blank("HERDR_GIT_SELECTION_FILE");
+    run_picker_with(
+        || {
+            let selection = match crate::picker::run() {
+                Ok(selection) => selection,
+                Err(error) => {
+                    if let Some(path) = selection_file.as_deref() {
+                        crate::state::publish_picker_selection(Path::new(path), None)?;
+                    }
+                    return Err(error);
+                }
+            };
+            if selection.is_none()
+                && let Some(path) = selection_file.as_deref()
+            {
+                crate::state::publish_picker_selection(Path::new(path), None)?;
+            }
+            Ok(selection)
+        },
+        crate::state::save_last_tool,
+        |tool| {
+            if let Some(path) = selection_file.as_deref() {
+                return crate::state::publish_picker_selection(Path::new(path), Some(tool.id));
+            }
+            let dir = std::env::current_dir()
+                .map_err(|e| format!("cannot read current directory: {e}"))?;
+            let dir = dir
+                .to_str()
+                .ok_or_else(|| "repository directory is not valid UTF-8".to_string())?;
+            let workspace_id = env_non_blank("HERDR_GITUI_WORKSPACE_ID");
+            let caller_pane = env_non_blank("HERDR_GITUI_CALLER_PANE");
+            let caller_agent = env_non_blank("HERDR_GITUI_CALLER_AGENT");
+            let caller_tab = env_non_blank("HERDR_GITUI_CALLER_TAB");
+            open_selected_tool(
+                tool,
+                dir,
+                workspace_id.as_deref(),
+                caller_pane.as_deref(),
+                caller_agent.as_deref(),
+                caller_tab.as_deref(),
+                &settings::Settings::load(),
+            )
+        },
+    )
+}
+
+fn run_picker_with(
+    picker: impl FnOnce() -> Result<Option<Tool>, String>,
+    save: impl FnOnce(&str),
+    open: impl FnOnce(&Tool) -> Result<(), String>,
+) -> Result<(), String> {
+    let Some(tool) = picker()? else {
+        return Ok(());
+    };
+    save(tool.id);
+    open(&tool)
+}
+
+fn open_selected_tool(
+    tool: &Tool,
+    dir: &str,
+    workspace_id: Option<&str>,
+    caller_pane: Option<&str>,
+    caller_agent: Option<&str>,
+    caller_tab: Option<&str>,
+    settings: &settings::Settings,
+) -> Result<(), String> {
+    open_selected_tool_with(
+        selected_tool_pane_request(
+            tool,
+            dir,
+            workspace_id,
+            caller_pane,
+            caller_agent,
+            caller_tab,
+            settings,
+        ),
+        herdr::selected_tool_pane_open,
+    )
+}
+
+fn selected_tool_pane_request<'a>(
+    tool: &'a Tool,
+    dir: &'a str,
+    workspace_id: Option<&'a str>,
+    caller_pane: Option<&'a str>,
+    caller_agent: Option<&'a str>,
+    caller_tab: Option<&'a str>,
+    settings: &'a settings::Settings,
+) -> herdr::SelectedToolPaneRequest<'a> {
     let popup_size = herdr::PopupSize {
         width: settings.width.as_deref(),
         height: settings.height.as_deref(),
     };
-    let reply = herdr::plugin_pane_open(
-        settings.placement,
-        settings.direction,
-        popup_size,
-        workspace_id.as_deref(),
-        &ctx.dir,
-        focused_pane_id.as_deref(),
-        focused_pane_agent.as_deref(),
-    )?;
+    herdr::SelectedToolPaneRequest {
+        context: herdr::PaneOpenContext {
+            placement: settings.placement,
+            direction: settings.direction,
+            popup_size,
+            workspace_id,
+            cwd: dir,
+            caller_pane,
+            caller_agent,
+        },
+        tool_id: tool.id,
+        tool_path: &tool.path,
+        caller_tab,
+    }
+}
+
+fn open_selected_tool_with(
+    request: herdr::SelectedToolPaneRequest<'_>,
+    open: impl FnOnce(herdr::SelectedToolPaneRequest<'_>) -> Result<herdr::PaneOpen, String>,
+) -> Result<(), String> {
+    let tool_id = request.tool_id;
+    let reply = open(request)?;
     match reply {
         // A popup reply carries no pane id and no tab id: report the popup
         // without identifiers and skip the best-effort `tab focus` re-assert
         // — there is no tab to focus (`--focus` itself stays in the argv).
-        herdr::PaneOpen::Popup => eprintln!("herdr-gitui: opened gitui popup"),
+        herdr::PaneOpen::Popup => eprintln!("herdr-gitui: opened {} popup", tool_id),
         herdr::PaneOpen::Pane { pane_id, tab_id } => match &tab_id {
             Some(tab) => {
-                eprintln!("herdr-gitui: opened gitui pane {pane_id} in tab {tab}");
+                eprintln!(
+                    "herdr-gitui: opened {} pane {pane_id} in tab {tab}",
+                    tool_id
+                );
                 // Defensive: re-assert focus best-effort against a
                 // client-side rendering race. Errors are deliberately
                 // ignored; herdr already applies `--focus` at open.
                 let _ = herdr::tab_focus(tab);
             }
-            None => eprintln!("herdr-gitui: opened gitui pane {pane_id}"),
+            None => eprintln!("herdr-gitui: opened {} pane {pane_id}", tool_id),
         },
     }
     Ok(())
@@ -161,26 +348,38 @@ pub(crate) fn run_pane() -> Result<(), String> {
         }
     };
 
-    let sessions = state_dir().join("sessions");
-    std::fs::create_dir_all(&sessions)
-        .map_err(|e| format!("failed to create state dir {}: {e}", sessions.display()))?;
-    prune_old_sessions(&sessions, SystemTime::now());
+    // Read the selected tool passed by action mode; do not rediscover or
+    // choose a tool in pane mode.
+    let tool_id = env_non_blank("HERDR_GIT_TOOL")
+        .ok_or_else(|| "HERDR_GIT_TOOL is not set; reopen this pane from the action".to_string())?;
+    let tool_path = env_non_blank("HERDR_GIT_TOOL_PATH").ok_or_else(|| {
+        "HERDR_GIT_TOOL_PATH is not set; reopen this pane from the action".to_string()
+    })?;
 
-    // Resolve gitui before anything else so a missing binary fails before
-    // any user-visible output.
-    let gitui_bin = gitui::find_gitui()?;
+    run_tool_session(&tool_id, &tool_path, dir)
+}
+
+fn run_tool_session(tool_id: &str, tool_path: &str, dir: PathBuf) -> Result<(), String> {
+    herdr::require_bin()?;
+
+    // Validate the selected executable before any banner or snapshot.
+    validate_tool_binary(tool_path)?;
+
+    // Create session state after validating the binary, so a stale handoff
+    // fails before any user-visible output or snapshot.
+    let sessions = create_sessions_dir(&state_dir())?;
+    prune_old_sessions(&sessions, SystemTime::now());
 
     // Before snapshot.
     let before = git::snapshot(&dir);
 
-    println!("herdr-gitui: starting gitui in {}", dir.display());
-    // gitui takes no positional path argument (gitui 0.28 rejects one with
-    // "error: unexpected argument") and its -d/--directory flag is the git dir
-    // (GIT_DIR), not the repo root. Discover the repo from cwd instead.
-    let status = Command::new(&gitui_bin)
+    println!("herdr-gitui: starting {tool_id} in {}", dir.display());
+    // Both tools discover the repository from cwd; pass no positional path
+    // or directory flag and inherit the pane's stdio.
+    let status = Command::new(tool_path)
         .current_dir(&dir)
         .status()
-        .map_err(|e| format!("failed to run {gitui_bin} in {}: {e}", dir.display()))?;
+        .map_err(|e| format!("failed to run {tool_path} in {}: {e}", dir.display()))?;
 
     // After snapshot.
     let after = git::snapshot(&dir);
@@ -193,12 +392,30 @@ pub(crate) fn run_pane() -> Result<(), String> {
     let caller_agent = env_non_blank("HERDR_GITUI_CALLER_AGENT");
 
     finish(
+        tool_id,
         status.code(),
         &sessions,
         &summary_text,
         caller_pane.as_deref(),
         caller_agent.as_deref(),
     )
+}
+
+fn validate_tool_binary(path: &str) -> Result<(), String> {
+    let path_obj = Path::new(path);
+    let metadata = std::fs::metadata(path_obj)
+        .map_err(|e| format!("selected Git TUI binary {path} is unavailable: {e}"))?;
+    if !metadata.is_file() {
+        return Err(format!("selected Git TUI binary {path} is not a file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(format!("selected Git TUI binary {path} is not executable"));
+        }
+    }
+    Ok(())
 }
 
 /// Real git queries implementation that calls git in the session directory.
@@ -304,6 +521,7 @@ fn run_git_quiet(dir: &Path, args: &[&str]) -> Option<Output> {
 /// pane; error and no-agent paths keep the summary file and block on stdin so
 /// the auto-closing pane stays readable.
 fn finish(
+    tool_id: &str,
     code: Option<i32>,
     sessions_dir: &Path,
     summary_text: &str,
@@ -326,7 +544,7 @@ fn finish(
             // the pane must never flash-close before the user reads gitui's
             // own error output and the plugin message.
             if !summary_text.trim().is_empty() {
-                let _ = write_session_file(sessions_dir, summary_text);
+                let _ = write_session_file(sessions_dir, tool_id, summary_text);
             }
             Err(format!("gitui failed with exit code {rc}"))
         }
@@ -336,7 +554,7 @@ fn finish(
             Ok(())
         }
         Outcome::NoAgent => {
-            let path = write_session_file(sessions_dir, summary_text)?;
+            let path = write_session_file(sessions_dir, tool_id, summary_text)?;
             eprintln!(
                 "herdr-gitui: no agent in focused pane; summary kept at {}",
                 path.display()
@@ -345,13 +563,13 @@ fn finish(
             Ok(())
         }
         Outcome::Deliver => {
-            let path = write_session_file(sessions_dir, summary_text)?;
+            let path = write_session_file(sessions_dir, tool_id, summary_text)?;
             // `decide` returns Deliver only when both caller pane and agent are
             // present, so the pane is always Some here; avoid expect() anyway.
             let Some(target) = caller_pane else {
                 return Err("internal: deliver outcome without a caller pane".to_string());
             };
-            let prompt = cap_prompt(&prompt_text(summary_text), MAX_PROMPT_BYTES, &path);
+            let prompt = cap_prompt(&prompt_text(tool_id, summary_text), MAX_PROMPT_BYTES, &path);
             match herdr::agent_prompt(target, &prompt) {
                 Ok(()) => {
                     eprintln!("herdr-gitui: sent session summary to agent pane {target}");
@@ -369,9 +587,14 @@ fn finish(
 }
 
 /// Writes the summary to a session file, returning its path.
-fn write_session_file(sessions_dir: &Path, summary_text: &str) -> Result<PathBuf, String> {
+fn write_session_file(
+    sessions_dir: &Path,
+    tool_id: &str,
+    summary_text: &str,
+) -> Result<PathBuf, String> {
     let path = sessions_dir.join(state_file_name(std::process::id(), unix_millis()?));
-    std::fs::write(&path, summary_text)
+    let contents = format!("{} session summary:\n\n{}", tool_id, summary_text);
+    std::fs::write(&path, contents)
         .map_err(|e| format!("failed to write session file {}: {e}", path.display()))?;
     Ok(path)
 }
@@ -383,20 +606,45 @@ fn write_session_file(sessions_dir: &Path, summary_text: &str) -> Result<PathBuf
 /// close the user's agent pane; the popup closes naturally when this process
 /// exits (herdr-side behavior), so the teardown makes zero herdr calls.
 fn close_pane() {
-    if env_non_blank("HERDR_GITUI_PLACEMENT").as_deref() == Some("popup") {
-        return;
+    let popup = is_popup_session();
+    if !popup {
+        restore_caller_tab();
     }
-    if let Some(pane) = env_non_blank("HERDR_PANE_ID") {
-        match herdr::pane_close(&pane) {
-            Ok(()) => return,
-            Err(e) => eprintln!("herdr-gitui: failed to close pane {pane}: {e}"),
+    let messages = close_pane_with(
+        popup,
+        env_non_blank("HERDR_PANE_ID").as_deref(),
+        env_non_blank("HERDR_TAB_ID").as_deref(),
+        herdr::pane_close,
+        herdr::tab_close,
+    );
+    for message in messages {
+        eprintln!("herdr-gitui: {message}");
+    }
+}
+
+fn close_pane_with(
+    popup: bool,
+    pane: Option<&str>,
+    tab: Option<&str>,
+    mut close_pane: impl FnMut(&str) -> Result<(), String>,
+    mut close_tab: impl FnMut(&str) -> Result<(), String>,
+) -> Vec<String> {
+    if popup {
+        return Vec::new();
+    }
+    let mut messages = Vec::new();
+    if let Some(pane) = pane {
+        match close_pane(pane) {
+            Ok(()) => return messages,
+            Err(e) => messages.push(format!("failed to close pane {pane}: {e}")),
         }
     }
-    if let Some(tab) = env_non_blank("HERDR_TAB_ID")
-        && let Err(e) = herdr::tab_close(&tab)
+    if let Some(tab) = tab
+        && let Err(e) = close_tab(tab)
     {
-        eprintln!("herdr-gitui: failed to close tab {tab}: {e}");
+        messages.push(format!("failed to close tab {tab}: {e}"));
     }
+    messages
 }
 
 /// Blocks the pane process on stdin so an auto-closing plugin pane stays
@@ -406,6 +654,23 @@ pub(crate) fn hold_pane() {
     eprintln!("{HOLD_PROMPT}");
     let mut line = String::new();
     let _ = std::io::stdin().read_line(&mut line);
+    if !is_popup_session() {
+        restore_caller_tab();
+    }
+}
+
+fn is_popup_session() -> bool {
+    env_non_blank("HERDR_GITUI_PLACEMENT").as_deref() == Some("popup")
+        || env_non_blank("HERDR_PLUGIN_ENTRYPOINT_ID").as_deref() == Some("picker")
+}
+
+fn restore_caller_tab() {
+    let Some(tab) = env_non_blank("HERDR_GITUI_CALLER_TAB") else {
+        return;
+    };
+    if let Err(error) = herdr::tab_focus(&tab) {
+        eprintln!("herdr-gitui: warning: failed to focus caller tab {tab}: {error}");
+    }
 }
 
 /// State filename: `<pid>-<unix millis>.txt`. The pid keeps two sessions
@@ -418,15 +683,32 @@ fn state_file_name(pid: u32, millis: u128) -> String {
 /// `SESSION_MAX_AGE`. Best-effort: a missing dir is ignored, removal failures
 /// are logged, and non-`.txt` entries are never touched.
 fn prune_old_sessions(dir: &Path, now: SystemTime) {
+    for message in prune_old_sessions_with(
+        dir,
+        now,
+        |entry| entry.metadata().and_then(|m| m.modified()),
+        |path| std::fs::remove_file(path),
+    ) {
+        eprintln!("herdr-gitui: warning: {message}");
+    }
+}
+
+fn prune_old_sessions_with(
+    dir: &Path,
+    now: SystemTime,
+    mut modified: impl FnMut(&std::fs::DirEntry) -> std::io::Result<SystemTime>,
+    mut remove_file: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+        return Vec::new();
     };
+    let mut messages = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("txt") {
             continue;
         }
-        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+        let Ok(modified) = modified(&entry) else {
             continue;
         };
         let Ok(age) = now.duration_since(modified) else {
@@ -435,19 +717,33 @@ fn prune_old_sessions(dir: &Path, now: SystemTime) {
         if age < SESSION_MAX_AGE {
             continue;
         }
-        if let Err(e) = std::fs::remove_file(&path) {
-            eprintln!(
-                "herdr-gitui: warning: cannot remove {}: {e}",
-                path.display()
-            );
+        if let Err(e) = remove_file(&path) {
+            messages.push(format!("cannot remove {}: {e}", path.display()));
         }
     }
+    messages
 }
 
 fn state_dir() -> PathBuf {
-    env_non_blank("HERDR_PLUGIN_STATE_DIR")
+    state_dir_from(
+        std::env::var("HERDR_PLUGIN_STATE_DIR").ok().as_deref(),
+        std::env::temp_dir(),
+    )
+}
+
+fn state_dir_from(value: Option<&str>, temp_dir: PathBuf) -> PathBuf {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
+        .unwrap_or(temp_dir)
+}
+
+fn create_sessions_dir(base: &Path) -> Result<PathBuf, String> {
+    let sessions = base.join("sessions");
+    std::fs::create_dir_all(&sessions)
+        .map_err(|e| format!("failed to create state dir {}: {e}", sessions.display()))?;
+    Ok(sessions)
 }
 
 /// Environment variable trimmed to a non-empty value, or `None`. Shared with
@@ -483,6 +779,7 @@ fn remove(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
     /// A scratch directory removed when the test ends.
     struct TempDir(PathBuf);
@@ -521,9 +818,220 @@ mod tests {
     #[test]
     fn prompt_text_has_header_and_trimmed_body() {
         assert_eq!(
-            prompt_text("  - created commit abc: fix\n"),
+            prompt_text("gitui", "  - created commit abc: fix\n"),
             "gitui session summary:\n\n- created commit abc: fix"
         );
+    }
+
+    #[test]
+    fn picker_confirmation_hands_selected_tool_to_session_pane_opener() {
+        let selected = Tool {
+            id: "lazygit",
+            path: "/canonical/lazygit".to_string(),
+        };
+        let mut saved = None;
+        let mut opened = None;
+        run_picker_with(
+            || Ok(Some(selected.clone())),
+            |tool_id| saved = Some(tool_id.to_string()),
+            |tool| {
+                opened = Some((tool.id, tool.path.clone()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(saved.as_deref(), Some("lazygit"));
+        assert_eq!(opened, Some(("lazygit", "/canonical/lazygit".to_string())));
+    }
+
+    #[test]
+    fn picker_forwards_caller_tab_to_selected_session_pane_request() {
+        let selected = Tool {
+            id: "gitui",
+            path: "/canonical/gitui".to_string(),
+        };
+        let caller_tab = RefCell::new(None);
+        run_picker_with(
+            || Ok(Some(selected.clone())),
+            |_| {},
+            |tool| {
+                open_selected_tool_with(
+                    selected_tool_pane_request(
+                        tool,
+                        "/repo",
+                        None,
+                        None,
+                        None,
+                        Some("T"),
+                        &settings::Settings::default(),
+                    ),
+                    |selected| {
+                        *caller_tab.borrow_mut() = selected.caller_tab.map(str::to_string);
+                        Ok(herdr::PaneOpen::Pane {
+                            pane_id: "pane".to_string(),
+                            tab_id: Some("T".to_string()),
+                        })
+                    },
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(caller_tab.borrow().as_deref(), Some("T"));
+    }
+
+    #[test]
+    fn popup_picker_closes_before_opening_confirmed_tool() {
+        let ticket = crate::state::PickerSelectionTicket::create().unwrap();
+        let path = ticket.path().to_owned();
+        let publisher = std::thread::spawn(move || {
+            crate::state::publish_picker_selection(&path, Some("lazygit")).unwrap();
+        });
+        let tools = [
+            Tool {
+                id: "gitui",
+                path: "/bin/gitui".to_string(),
+            },
+            Tool {
+                id: "lazygit",
+                path: "/bin/lazygit".to_string(),
+            },
+        ];
+        let calls = RefCell::new(Vec::new());
+        let request = RefCell::new(None);
+        complete_popup_picker(
+            &ticket,
+            &tools,
+            || {
+                calls.borrow_mut().push("close".to_string());
+                Ok(())
+            },
+            |tool| {
+                calls.borrow_mut().push(format!("open:{}", tool.id));
+                open_selected_tool_with(
+                    selected_tool_pane_request(
+                        tool,
+                        "/repo",
+                        None,
+                        None,
+                        None,
+                        None,
+                        &settings::Settings {
+                            placement: settings::Placement::Popup,
+                            width: Some("80".to_string()),
+                            height: Some("24".to_string()),
+                            ..settings::Settings::default()
+                        },
+                    ),
+                    |selected| {
+                        *request.borrow_mut() = Some((
+                            selected.tool_id.to_string(),
+                            selected.tool_path.to_string(),
+                            selected.context.placement,
+                            selected.context.popup_size.width.map(str::to_string),
+                            selected.context.popup_size.height.map(str::to_string),
+                        ));
+                        Ok(herdr::PaneOpen::Popup)
+                    },
+                )
+            },
+        )
+        .unwrap();
+        publisher.join().unwrap();
+        assert_eq!(*calls.borrow(), ["close", "open:lazygit"]);
+        assert_eq!(
+            *request.borrow(),
+            Some((
+                "lazygit".to_string(),
+                "/bin/lazygit".to_string(),
+                settings::Placement::Popup,
+                Some("80".to_string()),
+                Some("24".to_string())
+            ))
+        );
+    }
+
+    #[test]
+    fn canceled_popup_picker_does_not_close_or_open_a_tool_popup() {
+        let ticket = crate::state::PickerSelectionTicket::create().unwrap();
+        let path = ticket.path().to_owned();
+        let publisher = std::thread::spawn(move || {
+            crate::state::publish_picker_selection(&path, None).unwrap();
+        });
+        let tools = [Tool {
+            id: "gitui",
+            path: "/bin/gitui".to_string(),
+        }];
+        complete_popup_picker(
+            &ticket,
+            &tools,
+            || panic!("cancel must not close popup"),
+            |_| panic!("cancel must not open tool popup"),
+        )
+        .unwrap();
+        publisher.join().unwrap();
+    }
+
+    #[test]
+    fn picker_cancellation_does_not_save_or_open_a_tool() {
+        let mut saved = false;
+        let mut opened = false;
+        run_picker_with(
+            || Ok(None),
+            |_| saved = true,
+            |_| {
+                opened = true;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(!saved);
+        assert!(!opened);
+    }
+
+    #[test]
+    fn picker_still_opens_selected_tool_when_preference_save_fails() {
+        let dir = TempDir::new("picker-save-failure");
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, "block").unwrap();
+        let selected = Tool {
+            id: "gitui",
+            path: "/canonical/gitui".to_string(),
+        };
+        let mut opened = false;
+        run_picker_with(
+            || Ok(Some(selected)),
+            |tool_id| {
+                let result = crate::state::try_save_last_tool_to(&blocker, tool_id);
+                assert!(result.is_err());
+            },
+            |tool| {
+                opened = tool.id == "gitui";
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(opened);
+    }
+
+    #[test]
+    fn prompt_text_identifies_lazygit() {
+        assert_eq!(
+            prompt_text("lazygit", "- changed\n"),
+            "lazygit session summary:\n\n- changed"
+        );
+    }
+
+    #[test]
+    fn session_files_identify_selected_tool_and_preserve_summary() {
+        for (tool_id, expected_header) in [
+            ("gitui", "gitui session summary:\n\n"),
+            ("lazygit", "lazygit session summary:\n\n"),
+        ] {
+            let dir = TempDir::new(tool_id);
+            let path = write_session_file(dir.path(), tool_id, "- changed\n").unwrap();
+            let contents = std::fs::read_to_string(path).unwrap();
+            assert_eq!(contents, format!("{expected_header}- changed\n"));
+        }
     }
 
     #[test]
@@ -608,6 +1116,222 @@ mod tests {
         assert!(!old.exists(), "old .txt should be pruned");
         assert!(fresh.exists(), "fresh .txt should be kept");
         assert!(keep.exists(), "non-.txt entry should be kept");
+    }
+
+    #[test]
+    fn failed_outcome_keeps_nonempty_summary_file() {
+        let dir = TempDir::new("failed-keeps");
+        let result = finish("gitui", Some(7), dir.path(), "changed", None, None);
+        assert_eq!(result.unwrap_err(), "gitui failed with exit code 7");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn killed_outcome_writes_no_session_file() {
+        let dir = TempDir::new("killed-no-file");
+        let result = finish("gitui", None, dir.path(), "changed", None, None);
+        assert_eq!(
+            result.unwrap_err(),
+            "gitui terminated without an exit code (killed?)"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn failed_blank_summary_writes_no_session_file() {
+        let dir = TempDir::new("failed-blank");
+        let result = finish("gitui", Some(2), dir.path(), " \n\t", None, None);
+        assert_eq!(result.unwrap_err(), "gitui failed with exit code 2");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn failed_and_no_agent_write_failures_follow_their_contract() {
+        let dir = TempDir::new("write-fails");
+        let missing = dir.path().join("missing");
+        let failed = finish("gitui", Some(1), &missing, "changed", None, None);
+        assert_eq!(failed.unwrap_err(), "gitui failed with exit code 1");
+        let no_agent = finish("gitui", Some(0), &missing, "changed", None, None);
+        assert!(
+            no_agent
+                .unwrap_err()
+                .starts_with("failed to write session file ")
+        );
+    }
+
+    #[test]
+    fn pane_close_failure_falls_back_to_tab_close() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let messages = close_pane_with(
+            false,
+            Some("pane-1"),
+            Some("tab-1"),
+            |id| {
+                calls.borrow_mut().push(format!("pane {id}"));
+                Err("pane unavailable".into())
+            },
+            |id| {
+                calls.borrow_mut().push(format!("tab {id}"));
+                Ok(())
+            },
+        );
+        assert_eq!(*calls.borrow(), ["pane pane-1", "tab tab-1"]);
+        assert_eq!(messages, ["failed to close pane pane-1: pane unavailable"]);
+    }
+
+    #[test]
+    fn teardown_with_no_ids_makes_no_calls() {
+        let called = std::cell::Cell::new(false);
+        let messages = close_pane_with(
+            false,
+            None,
+            None,
+            |_| {
+                called.set(true);
+                Ok(())
+            },
+            |_| {
+                called.set(true);
+                Ok(())
+            },
+        );
+        assert!(!called.get());
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn popup_teardown_makes_no_close_calls() {
+        let called = std::cell::Cell::new(false);
+        let messages = close_pane_with(
+            true,
+            Some("caller"),
+            Some("tab"),
+            |_| {
+                called.set(true);
+                Ok(())
+            },
+            |_| {
+                called.set(true);
+                Ok(())
+            },
+        );
+        assert!(!called.get());
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn state_dir_uses_nonblank_override_or_temp_fallback() {
+        let temp = PathBuf::from("/tmp/herdr-test");
+        assert_eq!(state_dir_from(Some("  "), temp.clone()), temp);
+        assert_eq!(state_dir_from(None, temp.clone()), temp);
+        assert_eq!(
+            state_dir_from(Some(" /var/state "), temp),
+            PathBuf::from("/var/state")
+        );
+    }
+
+    #[test]
+    fn unusable_state_dir_fails_when_sessions_directory_cannot_be_created() {
+        let dir = TempDir::new("unusable-state");
+        let state_path_is_file = dir.path().join("state");
+        std::fs::write(&state_path_is_file, "file").unwrap();
+        let error = create_sessions_dir(&state_path_is_file).unwrap_err();
+        assert!(error.starts_with("failed to create state dir "));
+        assert!(error.contains("state/sessions"));
+    }
+
+    #[test]
+    fn pruning_uses_session_file_metadata_without_reading_contents() {
+        let dir = TempDir::new("prune-unreadable-content");
+        let summary = dir.path().join("kept.txt");
+        std::fs::write(&summary, "private summary").unwrap();
+        let now = SystemTime::now();
+        set_mtime(&summary, now);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&summary, std::fs::Permissions::from_mode(0o0)).unwrap();
+        }
+        let messages = prune_old_sessions_with(
+            dir.path(),
+            now,
+            |entry| entry.metadata()?.modified(),
+            |path| std::fs::remove_file(path),
+        );
+        assert!(messages.is_empty());
+        assert!(summary.exists());
+    }
+
+    #[test]
+    fn prune_removes_file_at_exact_seven_day_boundary() {
+        let dir = TempDir::new("prune-boundary");
+        let boundary = dir.path().join("boundary.txt");
+        std::fs::write(&boundary, "x").unwrap();
+        let now = SystemTime::now();
+        set_mtime(&boundary, now - SESSION_MAX_AGE);
+        prune_old_sessions(dir.path(), now);
+        assert!(!boundary.exists());
+    }
+
+    #[test]
+    fn prune_skips_metadata_errors_and_future_mtimes() {
+        let dir = TempDir::new("prune-skip");
+        let unreadable = dir.path().join("metadata-error.txt");
+        let mtime_error = dir.path().join("mtime-error.txt");
+        let future = dir.path().join("future.txt");
+        std::fs::write(&unreadable, "x").unwrap();
+        std::fs::write(&mtime_error, "x").unwrap();
+        std::fs::write(&future, "x").unwrap();
+        let now = SystemTime::now();
+        set_mtime(&future, now + Duration::from_secs(60));
+        let messages = prune_old_sessions_with(
+            dir.path(),
+            now,
+            |entry| {
+                if entry.file_name() == "metadata-error.txt" {
+                    Err(std::io::Error::other("metadata unavailable"))
+                } else if entry.file_name() == "mtime-error.txt" {
+                    let _metadata = entry.metadata()?;
+                    Err(std::io::Error::other("mtime unavailable"))
+                } else {
+                    entry.metadata()?.modified()
+                }
+            },
+            |path| std::fs::remove_file(path),
+        );
+        assert!(messages.is_empty());
+        assert!(unreadable.exists());
+        assert!(mtime_error.exists());
+        assert!(future.exists());
+    }
+
+    #[test]
+    fn prune_logs_vanished_file_and_continues_after_removal_failure() {
+        let dir = TempDir::new("prune-remove-errors");
+        let vanished = dir.path().join("vanished.txt");
+        let removable = dir.path().join("removable.txt");
+        std::fs::write(&vanished, "x").unwrap();
+        std::fs::write(&removable, "x").unwrap();
+        let now = SystemTime::now();
+        for path in [&vanished, &removable] {
+            set_mtime(path, now - SESSION_MAX_AGE - Duration::from_secs(1));
+        }
+        let messages = prune_old_sessions_with(
+            dir.path(),
+            now,
+            |entry| entry.metadata()?.modified(),
+            |path| {
+                if path == vanished {
+                    Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+                } else {
+                    std::fs::remove_file(path)
+                }
+            },
+        );
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].starts_with("cannot remove "));
+        assert!(messages[0].contains("vanished.txt"));
+        assert!(!removable.exists(), "a later removal must still run");
     }
 
     #[test]

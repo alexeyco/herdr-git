@@ -9,15 +9,15 @@
 
 ![herdr-git](assets/banner.svg)
 
-herdr plugin that opens [gitui](https://github.com/gitui-org/gitui) in a herdr pane and reports what the session changed to the agent.
+herdr plugin that opens [gitui](https://github.com/gitui-org/gitui) or [lazygit](https://github.com/jesseduffield/lazygit) in a herdr pane and reports what the session changed to the agent.
 
-[herdr](https://herdr.dev) is a terminal workspace manager and agent multiplexer; gitui is a blazing-fast terminal UI for git. This plugin bridges them: one keypress opens gitui straight into the TUI rooted at the repository, and when you quit gitui after committing, pushing, or switching branches, a short English summary of what changed is sent to the focused agent as a prompt. It targets the herdr plugin API v1 and runs on Linux and macOS (Windows untested). The pane layout — tab, split, overlay, zoom, or a centered popup — is configured in `config.toml`.
+[herdr](https://herdr.dev) is a terminal workspace manager and agent multiplexer. This plugin bridges it with gitui and lazygit: one keypress opens the available Git TUI rooted at the repository, and when you quit it after committing, pushing, or switching branches, a short English summary of what changed is sent to the focused agent as a prompt. It targets the herdr plugin API v1 and runs on Linux and macOS (Windows untested). The pane layout — tab, split, overlay, zoom, or a centered popup — is configured in `config.toml`.
 
 ## Demo
 
-One keypress opens gitui rooted at the repository; when you quit gitui after a commit, a branch switch, or a push, the changes arrive in the focused agent as a single prompt.
+One keypress opens gitui or lazygit rooted at the repository; when you quit after a commit, a branch switch, or a push, the changes arrive in the focused agent as a single prompt.
 
-<!-- TODO: record a short demo GIF or asciinema cast (keypress → gitui TUI → summary delivered) and embed here; keep it under ~15s -->
+<!-- TODO: record a short demo GIF or asciinema cast (keypress → Git TUI → summary delivered) and embed here; keep it under ~15s -->
 
 ## Other herdr plugins
 
@@ -40,19 +40,19 @@ Bind a key in your herdr config:
 [[keys.command]]
 key = "prefix+shift+g"
 type = "plugin_action"
-command = "alexeyco.gitui.open"
-description = "Open gitui"
+command = "alexeyco.git.open"
+description = "Open Git TUI"
 ```
 
 Or invoke the action from the CLI:
 
 ```
-herdr plugin action invoke alexeyco.gitui.open
+herdr plugin action invoke alexeyco.git.open
 ```
 
 ## Why
 
-- **Instant TUI.** Plugin pane commands are argv-exec, not send-text, so there is no shell layer and no echoed command line before gitui appears.
+- **Instant TUI.** Plugin pane commands are argv-exec, not send-text, so there is no shell layer and no echoed command line before the chosen TUI appears.
 - **Read-only observation.** The plugin takes before/after git snapshots with read-only probes; it never writes to the git index or tree.
 - **Agent-agnostic.** The summary goes to whichever agent herdr reports in the focused pane; no agent kind is special-cased.
 - **Configurable layout.** Tab, split beside the caller pane, overlay, zoom, or a centered popup — through `config.toml`.
@@ -62,7 +62,7 @@ herdr plugin action invoke alexeyco.gitui.open
 ## Requirements
 
 - herdr >= 0.9.0
-- [gitui](https://github.com/gitui-org/gitui) on `PATH` (no minimum version is enforced)
+- [gitui](https://github.com/gitui-org/gitui), [lazygit](https://github.com/jesseduffield/lazygit), or both on `PATH`; install either program yourself (no minimum version is enforced)
 - Rust toolchain 1.96.1 (the plugin builds itself on install)
 
 Release binaries are unsigned. macOS may quarantine them on first run; `xattr -d com.apple.quarantine <path>` clears the quarantine flag until the binaries are signed and notarized.
@@ -71,7 +71,23 @@ Release binaries are unsigned. macOS may quarantine them on first run; `xattr -d
 
 Any chord works; see the [herdr keyboard docs](https://herdr.dev/docs/keyboard/) for picking one that your terminal doesn't swallow.
 
-The action resolves the repository directory from the plugin context and execs gitui directly in the pane, so it opens straight into the TUI. When you quit gitui, the plugin compares read-only before/after git snapshots and builds an English summary of what changed:
+The plugin discovers executable `gitui` and `lazygit` programs on `PATH`; install the programs yourself. If neither is found, a setup popup links to both projects. If exactly one is found, the plugin opens it directly without a picker. If both are found, a picker appears on every invocation and preselects your last explicit choice. Use the arrow keys or `k`/`j` to move, Enter to choose, or Esc/`q` to cancel. Your choice opens in the configured herdr pane placement.
+
+Bind the action as `alexeyco.git.open`. Users must update their own keybindings and scripts; the plugin does not migrate the old `alexeyco.gitui.open` identifier automatically.
+
+## Comparison
+
+This compares `herdr-git` with using either supported Git TUI directly. “Built in” means available without user-written scripts or extra integrations.
+
+| Capability                                               | [herdr-git](https://github.com/alexeyco/herdr-git) | [gitui](https://github.com/gitui-org/gitui) | [lazygit](https://github.com/jesseduffield/lazygit) |
+| -------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------- | --------------------------------------------------- |
+| Runs as a herdr plugin action                            | ✅                                                 | ❌                                          | ❌                                                  |
+| Git TUI                                                  | Choose gitui or lazygit                            | gitui                                       | lazygit                                             |
+| Opens the TUI in a herdr pane                            | ✅                                                 | ❌                                          | ❌                                                  |
+| Sends a Git session summary to the focused agent on exit | ✅                                                 | ❌                                          | ❌                                                  |
+| Configures pane placement through herdr `config.toml`    | ✅                                                 | ❌                                          | ❌                                                  |
+
+When you quit the selected TUI, the plugin compares read-only before/after git snapshots and builds an English summary of what changed:
 
 | Situation                           | What is reported                                       |
 | ----------------------------------- | ------------------------------------------------------ |
@@ -96,7 +112,7 @@ Nothing changed → nothing is sent. Closing the pane early cancels the session 
 
 ## Configuration
 
-An optional flat-key `config.toml` in the plugin's config directory controls where the gitui pane opens:
+An optional flat-key `config.toml` in the plugin's config directory controls where the selected Git TUI pane opens:
 
 ```toml
 placement = "split"
@@ -113,16 +129,16 @@ height = "80%"
 
 | Key         | Values                                       | Default   | Notes                                                 |
 | ----------- | -------------------------------------------- | --------- | ----------------------------------------------------- |
-| `placement` | `tab`, `split`, `overlay`, `zoomed`, `popup` | `tab`     | How the gitui pane is placed in the layout            |
+| `placement` | `tab`, `split`, `overlay`, `zoomed`, `popup` | `tab`     | How the Git TUI pane is placed in the layout          |
 | `direction` | `right`, `down`, `auto`                      | `right`   | Split direction; used only when `placement = "split"` |
 | `width`     | Positive integer or `"N%"` string            | _(unset)_ | Popup width; used only when `placement = "popup"`     |
 | `height`    | Positive integer or `"N%"` string            | _(unset)_ | Popup height; used only when `placement = "popup"`    |
 
-`split` and `zoomed` open beside or over the caller pane — the plugin passes `--target-pane` with the id of the pane that triggered the action. If no caller pane resolves, a configured `split`/`zoomed` degrades to `tab` with a warning instead of failing the open. `popup` opens gitui as a centered session-modal window: it leaves the tiled layout untouched, receives all terminal input including Escape, and closes when gitui quits. `width`/`height` apply only to the popup placement; values below herdr's popup minimum are clamped by the daemon.
+`split` and `zoomed` open beside or over the caller pane — the plugin passes `--target-pane` with the id of the pane that triggered the action. If no caller pane resolves, a configured `split`/`zoomed` degrades to `tab` with a warning instead of failing the open. `popup` opens the selected Git TUI as a centered session-modal window: it leaves the tiled layout untouched, receives all terminal input including Escape, and closes when the TUI quits. `width`/`height` apply only to the popup placement; values below herdr's popup minimum are clamped by the daemon.
 
 Settings are read once per action launch, so an edit takes effect on the next launch. The plugin never fails over its settings: a missing `config.toml` silently means defaults, while a corrupt file, an unknown key, or an invalid value degrades to the defaults for that key with a warning you can see via `herdr plugin log list`. Focus is not configurable: the pane always opens focused.
 
-The file lives in the plugin's config directory: herdr injects its location as `HERDR_PLUGIN_CONFIG_DIR`, and `herdr plugin config-dir alexeyco.gitui` prints the same directory for you to edit in a shell.
+The file lives in the plugin's config directory: herdr injects its location as `HERDR_PLUGIN_CONFIG_DIR`, and `herdr plugin config-dir alexeyco.git` prints the same directory for you to edit in a shell.
 
 ## How it works
 

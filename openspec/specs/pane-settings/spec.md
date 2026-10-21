@@ -2,13 +2,7 @@
 
 ## Purpose
 
-The plugin's action mode discovers and reads a flat-key `config.toml` in the
-plugin's config directory before opening a pane, turning layout choices
-(`placement`, `direction`, and the popup size keys `width`/`height`) into
-user-editable settings. Directory discovery
-prefers `HERDR_PLUGIN_CONFIG_DIR` and falls back to a guarded
-`herdr plugin config-dir alexeyco.gitui` callback; every settings failure degrades to
-documented defaults with a stderr warning rather than aborting the action.
+The plugin's action mode discovers and reads a flat-key `config.toml` in its config directory before opening a pane, turning layout choices (`placement`, `direction`, and popup size keys `width`/`height`) into user-editable settings. Directory discovery prefers `HERDR_PLUGIN_CONFIG_DIR` and falls back to a guarded `herdr plugin config-dir alexeyco.git` callback; every settings failure degrades to documented defaults with a stderr warning rather than aborting the action.
 
 ## Requirements
 
@@ -16,11 +10,10 @@ documented defaults with a stderr warning rather than aborting the action.
 
 Action mode SHALL resolve the settings directory as the value of
 `HERDR_PLUGIN_CONFIG_DIR` when non-blank; when it is absent or blank it SHALL
-query `herdr plugin config-dir alexeyco.gitui` through the HERDR_BIN_PATH-guarded exec
-helper; when neither path yields a usable directory it SHALL use defaults for
-all settings and emit a warning on stderr. The settings layer SHALL never
+query `herdr plugin config-dir alexeyco.git` through the HERDR_BIN_PATH-guarded
+exec helper; when neither path yields a usable directory it SHALL use defaults
+for all settings and emit a warning on stderr. The settings layer SHALL never
 turn a config-directory failure into an action failure.
-(design.md: dual resolution; src/herdr.rs:8-36 for the guard)
 
 #### Scenario: Environment variable preferred
 
@@ -29,7 +22,7 @@ turn a config-directory failure into an action failure.
 
 #### Scenario: CLI fallback when env absent
 
-- **WHEN** `HERDR_PLUGIN_CONFIG_DIR` is unset or blank and the `plugin config-dir alexeyco.gitui` query prints a non-blank directory path line
+- **WHEN** `HERDR_PLUGIN_CONFIG_DIR` is unset or blank and the `plugin config-dir alexeyco.git` query prints a non-blank directory path line
 - **THEN** `config.toml` is read from the directory the callback reported
 
 #### Scenario: Neither source yields a directory

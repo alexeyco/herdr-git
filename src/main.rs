@@ -16,8 +16,11 @@ mod context;
 mod git;
 mod gitui;
 mod herdr;
+mod picker;
 mod session;
 mod settings;
+mod setup;
+mod state;
 mod summary;
 
 fn main() {
@@ -35,8 +38,8 @@ fn main() {
 /// Which entry point the process should run.
 #[derive(Debug, PartialEq, Eq)]
 enum RunMode {
-    /// `HERDR_PLUGIN_ENTRYPOINT_ID` is set: running inside the gitui pane.
-    Pane,
+    /// `HERDR_PLUGIN_ENTRYPOINT_ID` is set: running inside a plugin pane.
+    Pane(String),
     /// `HERDR_PLUGIN_ACTION_ID` is set: running the action.
     Action,
     /// Neither is set: invoked outside herdr.
@@ -47,7 +50,10 @@ enum RunMode {
 /// both are set, matching herdr's action-spawns-pane nesting.
 fn run_mode() -> RunMode {
     if env_set("HERDR_PLUGIN_ENTRYPOINT_ID") {
-        RunMode::Pane
+        RunMode::Pane(
+            std::env::var("HERDR_PLUGIN_ENTRYPOINT_ID")
+                .expect("entrypoint is set when pane mode is selected"),
+        )
     } else if env_set("HERDR_PLUGIN_ACTION_ID") {
         RunMode::Action
     } else {
@@ -57,7 +63,14 @@ fn run_mode() -> RunMode {
 
 fn run() -> Result<(), String> {
     match run_mode() {
-        RunMode::Pane => session::run_pane(),
+        RunMode::Pane(entrypoint) => match entrypoint.as_str() {
+            "open" => session::run_pane(),
+            "picker" => session::run_picker(),
+            "setup" => setup::run(),
+            unknown => Err(format!(
+                "unknown pane entrypoint '{unknown}'; expected one of: open, picker, setup"
+            )),
+        },
         RunMode::Action => session::run_action(),
         RunMode::Outside => Err("invoked outside herdr plugin context".to_string()),
     }
@@ -124,7 +137,7 @@ mod tests {
     #[test]
     fn entrypoint_only_is_pane() {
         let _env = ModeEnv::set(Some("open"), None);
-        assert_eq!(run_mode(), RunMode::Pane);
+        assert_eq!(run_mode(), RunMode::Pane("open".to_string()));
     }
 
     #[test]
@@ -136,7 +149,7 @@ mod tests {
     #[test]
     fn both_set_prefers_pane() {
         let _env = ModeEnv::set(Some("open"), Some("open"));
-        assert_eq!(run_mode(), RunMode::Pane);
+        assert_eq!(run_mode(), RunMode::Pane("open".to_string()));
     }
 
     #[test]

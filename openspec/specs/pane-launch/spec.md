@@ -2,35 +2,35 @@
 
 ## Purpose
 
-Action mode is the entry point herdr invokes for the plugin's `open` action
-(declared in `herdr-plugin.toml`: plugin id `alexeyco.gitui`, version `0.1.0`, action
-id `open`, pane id `open` with `placement = "tab"`, `min_herdr_version
-"0.9.0"`, no keybindings declared). It reads the plugin context herdr passes
-as JSON, resolves the repository directory, and calls back into herdr with
-`herdr plugin pane open --placement tab` to launch the gitui pane in a new
-tab, exporting the resolved directory and the caller pane/agent identities
-to the pane through `HERDR_GITUI_*` environment variables. On success the
-action prints the new pane id and exits immediately; pane setup and the
-session itself continue in pane mode.
+Action mode is the entry point herdr invokes for the plugin's `open` action (declared in `herdr-plugin.toml`: plugin id `alexeyco.git`, version `0.1.0`, action id `open`, session pane id `open`, with popup `picker` and `setup` entrypoints, `min_herdr_version "0.9.0"`, and no keybindings declared). It reads the plugin context herdr passes as JSON, resolves the repository directory, and calls back into herdr with `herdr plugin pane open --plugin alexeyco.git` to launch a tool pane, exporting the resolved directory and caller identities through `HERDR_GITUI_*` environment variables. On success the action prints the new pane id and exits immediately; pane setup and the session itself continue in pane mode.
 
 ## Requirements
 
 ### Requirement: Manifest identity defines the qualified action name
 
-The plugin manifest SHALL declare plugin id `alexeyco.gitui` and action id
-`open`, producing the qualified action identifier `alexeyco.gitui.open`.
-The action id and pane entrypoint id SHALL remain `open`; the plugin SHALL
-NOT expose `gitui.open` as an alias.
+The plugin manifest SHALL declare plugin id `alexeyco.git` and action id
+`open`, producing the sole qualified action identifier
+`alexeyco.git.open`. The action id and session pane entrypoint id SHALL remain
+`open`; the manifest SHALL also declare popup pane entrypoints `picker` and
+`setup`, each handled by a distinct pane-mode flow;
+the plugin SHALL NOT expose `alexeyco.gitui.open` or `gitui.open` as aliases.
+Users SHALL configure the new action name themselves; the plugin SHALL NOT
+rewrite user configuration or provide migration behavior.
 
 #### Scenario: Qualified action is invoked
 
-- **WHEN** a Herdr setting binds `command = "alexeyco.gitui.open"` or a user runs `herdr plugin action invoke alexeyco.gitui.open`
+- **WHEN** a Herdr setting binds `command = "alexeyco.git.open"` or a user runs `herdr plugin action invoke alexeyco.git.open`
 - **THEN** Herdr invokes the plugin's `open` action
 
 #### Scenario: Old action name is not an alias
 
-- **WHEN** a setting or invocation uses `gitui.open`
-- **THEN** this plugin does not resolve that name as an alias for `alexeyco.gitui.open`
+- **WHEN** a setting or invocation uses `gitui.open` or `alexeyco.gitui.open`
+- **THEN** this plugin does not resolve that name as an alias for `alexeyco.git.open`
+
+#### Scenario: Explicit configuration is user-owned
+
+- **WHEN** a user's external Herdr settings still name the previous qualified action
+- **THEN** the plugin neither rewrites those settings nor resolves the previous qualified action as an alias; the user must configure `alexeyco.git.open`
 
 ### Requirement: Action mode requires a non-blank plugin context JSON
 
@@ -119,122 +119,119 @@ shared check guards every herdr call the plugin makes in either mode
 
 #### Scenario: Config-dir query passes through the same guard
 
-- **WHEN** the settings layer attempts the `plugin config-dir alexeyco.gitui` fallback query with `HERDR_BIN_PATH` missing or blank
+- **WHEN** the settings layer attempts the `plugin config-dir alexeyco.git` fallback query with `HERDR_BIN_PATH` missing or blank
 - **THEN** the shared check rejects that call as well, and the settings layer treats the rejection as "config directory unavailable" (a warning, not an action failure)
 
 ### Requirement: Pane open passes a fixed argv and requires a pane id in the reply
 
-Action mode SHALL build the pane-open argv in the fixed order shown below;
-the `--placement` value comes from the loaded settings (`tab`, `split`,
-`overlay`, `zoomed`, or `popup`; default `tab`) instead of a hardcoded
-literal, and a `--direction right|down` pair appears immediately after the
-placement value only when the effective placement is `split` and the
-configured direction is not `auto` — for non-split placements a configured
-direction is ignored, and `auto` means the flag is not passed (herdr docs do
-not guarantee `--direction` for non-split placements). When the effective
-placement is `split` or `zoomed` and the caller pane is resolved,
-`--target-pane <caller-pane-id>` SHALL appear immediately after the
-`--direction` position (after the pair when present, otherwise directly
-after the placement value); the caller pane is `focused_pane_id` from the
-plugin context with the existing `HERDR_PANE_ID` env fallback — the same
-value already exported as `HERDR_GITUI_CALLER_PANE`. For `tab`, `overlay`,
-and `popup` placements no `--target-pane` is passed. When the effective
-placement is `split` or `zoomed` but the caller pane is not resolved, the
-action SHALL print a stderr warning and fall back to placement `tab` for the
-open — herdr rejects split/zoomed without a target pane, and the user's
-explicit choice must never surface as a cryptic `invalid_params` failure
-(degradation consistent with the never-fatal settings philosophy).
-`--workspace <id>` is passed only when the effective placement is `tab`; for
-`split`, `zoomed`, `overlay`, and `popup` the open targets a pane rather
-than a workspace and the pair is omitted entirely — the daemon rejects the
-combinations: `--workspace` together with `--target-pane` on split/zoomed
-fails with `invalid_params` "split and zoomed plugin panes target an
-existing pane; use target_pane_id" (even when the target pane is present),
-and `--workspace` on overlay or popup fails with `invalid_params` "overlay
-and popup plugin panes target the active pane" (overlay and popup target the
-daemon-derived active pane without any `--target-pane` from the plugin). For
-the `popup` placement, optional `--width <v>` and `--height <v>` pairs
-appear immediately after the `--placement popup` value, in that order, only
-when the corresponding settings key is valid and set — each pair
-independently, so a width-only config emits only `--width` — and an omitted
-or invalid key emits no flag (herdr's default half-size popup applies); the
-flag value is the configured positive integer or `N%` string passed verbatim
-as an argv token. For the `popup` placement the action SHALL additionally
-export `--env HERDR_GITUI_PLACEMENT=popup` immediately after the
-`HERDR_GITUI_DIR` pair, and for no other placement (non-popup argv stays
-byte-identical) so pane mode can gate its teardown on it. Caller `--env`
-pairs appear whenever resolved, while `HERDR_GITUI_DIR` and `--focus` are
-always present (src/herdr.rs:60-100). For every non-popup placement the
-reply SHALL carry a non-blank `result.plugin_pane.pane.pane_id` — a missing
-pane id is the failure described in the scenario below; a `popup` open is
-exempt: the daemon's popup reply is `{"id":"cli:plugin","result":{"type":"ok"}}`
-with no pane id at all (live-verified on herdr 0.9.5, because a popup is a
-singleton session resource rather than a Herdr pane), and such a reply SHALL
-be treated as success, while a popup reply that is not valid JSON or carries
-a non-`ok` result (e.g. `ui_busy` while another Herdr modal is active) fails
-through the unchanged pane-open error path. `tab_id` is optional in all
-cases and raw reply snippets in errors are truncated at 200 characters
-(src/herdr.rs:102-121,151-158).
+Action mode SHALL retain the existing session pane-open argv ordering,
+placement and reply handling, while using `--plugin alexeyco.git` for every
+pane-open call. The `--entrypoint open`, settings-driven placement, caller
+context, popup handling, pane-id validation, and optional tab-id behavior
+for the session pane SHALL remain unchanged. When action mode requests the
+tool picker or setup guidance, it SHALL open the corresponding `picker` or
+`setup` entrypoint with popup placement and SHALL NOT route those entrypoints
+through the `open` session pane flow.
+
+#### Scenario: Manifest declares all pane entrypoints
+
+- **WHEN** the manifest is loaded
+- **THEN** it declares pane ids `open`, `picker`, and `setup`, with `open` at tab placement and `picker` and `setup` at popup placement
+
+#### Scenario: Pane mode dispatches by entrypoint id
+
+- **WHEN** Herdr starts the binary with `HERDR_PLUGIN_ENTRYPOINT_ID` set to `open`, `picker`, or `setup`
+- **THEN** `src/main.rs` dispatches respectively to the session flow, `session::run_picker()` wrapper, or separate setup flow
+
+#### Scenario: Unknown pane entrypoint fails
+
+- **WHEN** pane mode starts with an entrypoint id other than `open`, `picker`, or `setup`
+- **THEN** it returns an error that identifies the unknown id and expected entrypoints
+
+#### Scenario: Picker and setup are requested as popups
+
+- **WHEN** action mode needs a picker or install guidance
+- **THEN** it invokes the `picker` popup with the canonical tool paths, saved preference, repository directory, and caller context, or invokes the `setup` popup when no tool is installed; both requests use `--plugin alexeyco.git`, their corresponding `--entrypoint`, and `--placement popup`
+
+#### Scenario: Picker opens the chosen session pane
+
+- **WHEN** the user confirms a tool in the picker popup
+- **THEN** the picker publishes the confirmed tool id and closes its compact popup; the action then opens the `open` pane with the chosen tool id and canonical executable path using configured placement and popup dimensions
+
+#### Scenario: Popup picker preserves configured dimensions
+
+- **WHEN** configured placement is `popup` and width or height is set
+- **THEN** the picker uses its compact manifest dimensions, closes before a second popup opens, and the selected tool popup receives the configured size flags
+
+#### Scenario: Picker declares compact dimensions
+
+- **WHEN** the plugin manifest is loaded
+- **THEN** the `picker` popup has width `52` and height `7`, independently of user settings for the selected TUI popup
+
+#### Scenario: Picker preserves the caller tab
+
+- **WHEN** the action context includes caller tab id `T`, the user selects a tool, and configured placement is not `popup`
+- **THEN** the picker forwards `T` to the selected session pane as `HERDR_GITUI_CALLER_TAB`
 
 #### Scenario: Full context
 
-- **WHEN** workspace id `W`, caller pane `P`, and caller agent `A` are all resolved for directory `D` and no placement/direction config is active (defaults)
-- **THEN** argv is exactly `plugin pane open --plugin alexeyco.gitui --entrypoint open --placement tab --workspace W --cwd D --env HERDR_GITUI_DIR=D --env HERDR_GITUI_CALLER_PANE=P --env HERDR_GITUI_CALLER_AGENT=A --focus`
+- **WHEN** workspace id `W`, caller pane `P`, and caller agent `A` are resolved for directory `D` with default settings
+- **THEN** the argv is `plugin pane open --plugin alexeyco.git --entrypoint open --placement tab --workspace W --cwd D --env HERDR_GITUI_DIR=D --env HERDR_GITUI_CALLER_PANE=P --env HERDR_GITUI_CALLER_AGENT=A --focus`
 
 #### Scenario: Minimal context
 
-- **WHEN** no workspace id, caller pane, or caller agent resolved for directory `D` and no placement/direction config is active (defaults)
-- **THEN** argv is exactly `plugin pane open --plugin alexeyco.gitui --entrypoint open --placement tab --cwd D --env HERDR_GITUI_DIR=D --focus`
+- **WHEN** no workspace id, caller pane, or caller agent resolves for directory `D` with default settings
+- **THEN** the argv is `plugin pane open --plugin alexeyco.git --entrypoint open --placement tab --cwd D --env HERDR_GITUI_DIR=D --focus`
 
 #### Scenario: Split placement with explicit direction
 
-- **WHEN** the config sets `placement = "split"` and `direction = "down"` for directory `D` and caller pane `P` is resolved
-- **THEN** argv contains `--placement split --direction down --target-pane P` in the placement position, no other placement or direction flags, and no `--workspace` token
+- **WHEN** placement is `split`, direction is `down`, and caller pane `P` resolves
+- **THEN** argv contains `--plugin alexeyco.git --entrypoint open --placement split --direction down --target-pane P` and no `--workspace` token
 
 #### Scenario: Split placement with auto direction
 
-- **WHEN** the config sets `placement = "split"` and `direction = "auto"` for directory `D` and caller pane `P` is resolved
-- **THEN** argv contains `--placement split --target-pane P`, no `--direction` flag at all, and no `--workspace` token
+- **WHEN** placement is `split`, direction is `auto`, and caller pane `P` resolves
+- **THEN** argv contains `--plugin alexeyco.git --entrypoint open --placement split --target-pane P` with no `--direction` or `--workspace` token
 
 #### Scenario: Direction ignored for non-split placements
 
-- **WHEN** the config sets `placement = "zoomed"` (or `overlay`, or `tab`) and `direction = "down"` for directory `D` and caller pane `P` is resolved
-- **THEN** argv contains `--placement zoomed` (or the respective value) and no `--direction` flag; `zoomed` additionally carries `--target-pane P` while `overlay` and `tab` carry no `--target-pane`; `zoomed` and `overlay` also carry no `--workspace` token (only `tab` keeps `--workspace` when a workspace id resolves)
+- **WHEN** placement is `zoomed`, `overlay`, or `tab`, with direction `down`
+- **THEN** argv uses `--plugin alexeyco.git`, omits `--direction`, and retains the existing target-pane and workspace rules for each placement
 
 #### Scenario: Split targets the caller pane
 
-- **WHEN** the effective placement is `split` with direction `down` and caller pane `P` is resolved
-- **THEN** argv reads `--placement split --direction down --target-pane P` followed by the remaining fixed-order arguments and contains no `--workspace` token even when a workspace id is resolved
+- **WHEN** placement is `split`, direction is `down`, and caller pane `P` resolves
+- **THEN** argv includes `--plugin alexeyco.git --placement split --direction down --target-pane P` and no `--workspace` token
 
 #### Scenario: Zoomed targets the caller pane
 
-- **WHEN** the effective placement is `zoomed` and caller pane `P` is resolved
-- **THEN** argv reads `--placement zoomed --target-pane P` with no `--direction` flag and no `--workspace` token
+- **WHEN** placement is `zoomed` and caller pane `P` resolves
+- **THEN** argv includes `--plugin alexeyco.git --placement zoomed --target-pane P`, without `--direction` or `--workspace`
 
 #### Scenario: Overlay omits workspace targeting
 
-- **WHEN** the effective placement is `overlay` and a workspace id `W` is resolved for directory `D`
-- **THEN** argv contains `--placement overlay` and no `--workspace` token and no `--target-pane` token — the daemon targets the active pane itself
+- **WHEN** placement is `overlay` and workspace id `W` resolves
+- **THEN** argv includes `--plugin alexeyco.git --placement overlay` and omits `--workspace` and `--target-pane`
 
 #### Scenario: Unresolvable caller pane falls back to tab with warning
 
-- **WHEN** the configured placement is `split` or `zoomed` but no caller pane resolves from `focused_pane_id` or the `HERDR_PANE_ID` env fallback
-- **THEN** the action prints a `herdr-gitui:`-prefixed stderr warning and opens with `--placement tab` (no `--direction`, no `--target-pane`) instead of letting herdr fail with `invalid_params`; the fallback uses the tab argv shape, so `--workspace` appears when a workspace id is resolved
+- **WHEN** placement is `split` or `zoomed` and no caller pane resolves
+- **THEN** the action warns and uses the existing tab argv shape with `--plugin alexeyco.git`, no `--direction` or `--target-pane`, and `--workspace` when resolved
 
 #### Scenario: Popup passes size flags
 
-- **WHEN** the effective placement is `popup` with resolved `width = 80` and `height = "80%"` for directory `D` and caller pane `P` resolved, and a workspace id `W` is resolved
-- **THEN** argv is exactly `plugin pane open --plugin alexeyco.gitui --entrypoint open --placement popup --width 80 --height 80% --cwd D --env HERDR_GITUI_DIR=D --env HERDR_GITUI_PLACEMENT=popup --env HERDR_GITUI_CALLER_PANE=P --focus`, with no `--workspace`, no `--target-pane`, and no `--direction` token; a width-only config (no valid `height`) is identical minus the `--height 80%` pair
+- **WHEN** placement is `popup` with width `80`, height `80%`, directory `D`, and caller pane `P`
+- **THEN** argv is `plugin pane open --plugin alexeyco.git --entrypoint open --placement popup --width 80 --height 80% --cwd D --env HERDR_GITUI_DIR=D --env HERDR_GITUI_PLACEMENT=popup --env HERDR_GITUI_CALLER_PANE=P --focus`, with no workspace, target-pane, or direction flags
 
 #### Scenario: Reply without pane id
 
-- **WHEN** a non-popup pane-open reply lacks a non-blank `result.plugin_pane.pane.pane_id` or is not valid JSON
-- **THEN** the action fails with an error naming the missing path (or the parse error) and a raw snippet of at most 200 characters; a popup reply is exempt from this rule (see "Popup opens without pane id reply" under the success-reporting requirement)
+- **WHEN** a non-popup reply lacks a pane id or is invalid JSON
+- **THEN** the action reports the existing missing-id or parse error; popup reply handling remains unchanged
 
 #### Scenario: Reply without tab id
 
-- **WHEN** the reply carries a valid `pane_id` but no non-blank `tab_id`
-- **THEN** the open succeeds with no tab id reported
+- **WHEN** the reply includes a valid pane id but no tab id
+- **THEN** the open succeeds without reporting a tab id
 
 ### Requirement: Success reports the pane and re-asserts tab focus best-effort
 
