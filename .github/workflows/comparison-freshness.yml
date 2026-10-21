@@ -1,0 +1,74 @@
+# Monthly check of the README comparison. Release-tag drift opens a rolling
+# pull request; other source drift updates one issue. Unavailable sources fail
+# the run without opening either.
+name: comparison-freshness
+
+on:
+  schedule:
+    - cron: "0 6 1 * *"
+  workflow_dispatch:
+
+concurrency:
+  group: comparison-freshness
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Only peers with a published GitHub release are release-tag monitored.
+      # The checker still verifies links to every peer README.
+      EXPECT_REPOS: Crokily/herdr-lazygit@v0.4.0,alexarthurs/herdr-sidebar@v0.15.1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Check README comparison
+        id: check
+        run: |
+          set +e
+          node scripts/check-comparison.mjs --report drift-report.md --summary "$GITHUB_STEP_SUMMARY"
+          code=$?
+          case "$code" in 0|1|2) ;; *) echo "comparison-check: unexpected exit $code" >&2; exit "$code";; esac
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Update release cells and expected tags
+        if: steps.check.outputs.code == '1'
+        run: node scripts/check-comparison.mjs --fix
+      - name: Format README
+        if: steps.check.outputs.code == '1'
+        run: npx --yes prettier@3.9.6 --write README.md
+      - name: Open or update rolling comparison PR
+        if: steps.check.outputs.code == '1'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: chore/comparison-freshness
+          base: master
+          delete-branch: true
+          add-paths: |
+            README.md
+            .github/workflows/comparison-freshness.yml
+          commit-message: "Comparison: update release tags"
+          title: "Comparison: update release tags"
+          body: |
+            The monthly comparison check found release-tag drift and updated the README release cells and workflow expectations together.
+
+            Please review and merge this pull request. The workflow never updates `master` directly.
+      - name: File or update comparison drift issue
+        if: steps.check.outputs.code == '1'
+        run: |
+          if [ -f drift-report.md ]; then
+            node scripts/check-comparison.mjs --report-issue drift-report.md
+          fi
+      - name: Fail when a source was unavailable
+        if: steps.check.outputs.code == '2'
+        run: |
+          echo "comparison-check: an upstream source was unavailable; no pull request or issue was created" >&2
+          exit 1

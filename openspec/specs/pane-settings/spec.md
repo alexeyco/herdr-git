@@ -1,14 +1,8 @@
-# pane-settings Specification
+# Pane settings
 
 ## Purpose
 
-The plugin's action mode discovers and reads a flat-key `config.toml` in the
-gitui plugin's config directory before opening a pane, turning layout choices
-(`placement`, `direction`, and the popup size keys `width`/`height`) into
-user-editable settings. Directory discovery
-prefers `HERDR_PLUGIN_CONFIG_DIR` and falls back to a guarded
-`herdr plugin config-dir gitui` callback; every settings failure degrades to
-documented defaults with a stderr warning rather than aborting the action.
+The plugin's action mode discovers and reads a flat-key `config.toml` in its config directory before opening a pane, turning layout choices (`placement`, `direction`, and popup size keys `width`/`height`) into user-editable settings. Directory discovery prefers `HERDR_PLUGIN_CONFIG_DIR` and falls back to a guarded `herdr plugin config-dir alexeyco.git` callback; every settings failure degrades to documented defaults with a stderr warning rather than aborting the action.
 
 ## Requirements
 
@@ -16,11 +10,10 @@ documented defaults with a stderr warning rather than aborting the action.
 
 Action mode SHALL resolve the settings directory as the value of
 `HERDR_PLUGIN_CONFIG_DIR` when non-blank; when it is absent or blank it SHALL
-query `herdr plugin config-dir gitui` through the HERDR_BIN_PATH-guarded exec
-helper; when neither path yields a usable directory it SHALL use defaults for
-all settings and emit a warning on stderr. The settings layer SHALL never
+query `herdr plugin config-dir alexeyco.git` through the HERDR_BIN_PATH-guarded
+exec helper; when neither path yields a usable directory it SHALL use defaults
+for all settings and emit a warning on stderr. The settings layer SHALL never
 turn a config-directory failure into an action failure.
-(design.md: dual resolution; src/herdr.rs:8-36 for the guard)
 
 #### Scenario: Environment variable preferred
 
@@ -29,7 +22,7 @@ turn a config-directory failure into an action failure.
 
 #### Scenario: CLI fallback when env absent
 
-- **WHEN** `HERDR_PLUGIN_CONFIG_DIR` is unset or blank and the `plugin config-dir gitui` query prints a non-blank directory path line
+- **WHEN** `HERDR_PLUGIN_CONFIG_DIR` is unset or blank and the `plugin config-dir alexeyco.git` query prints a non-blank directory path line
 - **THEN** `config.toml` is read from the directory the callback reported
 
 #### Scenario: Neither source yields a directory
@@ -58,15 +51,10 @@ launch, not during a running session.
 
 ### Requirement: Invalid config content degrades to defaults with warnings
 
-Action mode SHALL parse `config.toml` with flat top-level keys and SHALL
-never fail the action over its content: unparseable TOML SHALL fall back to
-all defaults with one warning, and a file that exists but cannot be read
-(e.g. a permission error) SHALL be treated as unparseable content the same
-way — all defaults with one warning; a key outside the known set SHALL
-produce a warning while every known key keeps its effect; and an invalid or
-non-string value for a known key SHALL fall back to that key's own default
-with a warning while the other keys keep their effect.
-(design.md: two-phase parsing)
+Action mode SHALL parse flat top-level keys in `config.toml` without failing
+because of its contents. Unreadable or invalid TOML SHALL apply all defaults
+with one warning. Unknown keys SHALL warn; invalid known values SHALL warn
+and use that key's default while preserving other valid settings.
 
 #### Scenario: Corrupt TOML
 
@@ -90,21 +78,11 @@ with a warning while the other keys keep their effect.
 
 ### Requirement: Popup size keys width and height
 
-The known key set SHALL include two optional keys, `width` and `height`,
-each valid either as a positive integer TOML value (outer terminal-cell
-dimensions) or as a string percentage of the form `N%` (e.g. `"80%"`); the
-`placement` key's value set SHALL be `tab` (default) | `split` | `overlay` |
-`zoomed` | `popup`. An omitted key SHALL stay unset and no size flag is
-passed (herdr renders its documented default half-size popup); an invalid
-value for either key SHALL fall back to that key's own default — left unset —
-with a stderr warning while the other keys keep their effect, per the
-per-key fallback policy of "Invalid config content degrades to defaults with
-warnings". Resolved size values SHALL reach herdr only when the effective
-placement is `popup` (the `--width`/`--height` flags are specified by the
-pane-launch capability); for every other placement they SHALL be ignored
-silently, with no warning, following the same pattern as `direction` for
-non-split placements. Values smaller than herdr's popup minimum are clamped
-by the daemon, not validated by the plugin.
+The optional `width` and `height` keys SHALL accept positive integer cell
+dimensions or percentage strings such as `"80%"`. Missing or invalid size
+values SHALL remain unset; invalid values warn and do not affect other
+settings. Resolved sizes SHALL be passed only for `popup` placement and
+ignored silently otherwise. Herdr clamps values below its popup minimum.
 
 #### Scenario: Integer cells and percentage string are valid
 

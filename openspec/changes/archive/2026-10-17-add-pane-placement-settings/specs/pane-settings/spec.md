@@ -1,4 +1,4 @@
-# pane-settings
+# Pane settings
 
 ## Purpose
 

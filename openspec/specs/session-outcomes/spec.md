@@ -1,45 +1,62 @@
-# session-outcomes
+# Session outcomes
 
 ## Purpose
 
-This capability decides and executes what happens after gitui exits inside the
-plugin pane. The plugin maps gitui's exit status, the built session summary,
-and the presence of a calling agent to exactly one of five outcomes — Killed,
-Failed, NoChanges, NoAgent, Deliver — each with a defined effect on session
-state files, user-visible messages, pane teardown or hold, and process exit
-code. It also owns the on-disk session summary files (location, naming,
-creation, removal) and the best-effort pruning of kept summaries older than
-seven days.
+This capability decides and executes what happens after the selected Git TUI exits inside the plugin pane. The plugin maps its exit status, the built session summary, and the presence of a calling agent to exactly one of five outcomes — Killed, Failed, NoChanges, NoAgent, Deliver — each with a defined effect on session state files, user-visible messages, pane teardown or hold, and process exit code. It also owns the on-disk session summary files (location, naming, creation, removal) and the best-effort pruning of kept summaries older than seven days.
 
 ## Requirements
 
+### Requirement: Session completion restores the caller tab
+
+For tab sessions, the plugin SHALL best-effort focus a non-blank caller tab
+before teardown on `NoChanges` and `Deliver`, and after the hold on
+`NoAgent`, `Killed`, and `Failed`. Missing tab ids or focus failures SHALL
+not change the outcome. Popup sessions SHALL NOT focus tabs or call pane
+teardown; they close when the TUI exits.
+
+#### Scenario: Clean completion returns focus before pane teardown
+
+- **WHEN** a tab-placement session ends with `NoChanges` or successfully delivers its summary and `HERDR_GITUI_CALLER_TAB` is `T`
+- **THEN** `herdr tab focus T` is attempted before the session pane is closed
+
+#### Scenario: Held session returns focus after Enter
+
+- **WHEN** a tab-placement session is held for an error or missing caller agent and the user presses Enter
+- **THEN** `herdr tab focus T` is attempted before the process exits
+
+#### Scenario: Missing caller tab or popup skips restoration
+
+- **WHEN** the caller tab id is absent or the session runs in a popup
+- **THEN** no caller-tab focus call is made and the session outcome is unchanged
+
+#### Scenario: Selected TUI popup closes on exit
+
+- **WHEN** a TUI runs in the configured popup and exits
+- **THEN** its popup closes as the process exits without a pane-close callback
+
 ### Requirement: Outcome decision precedence
 
-The plugin SHALL decide the session outcome from gitui's exit code, the
-summary text, and agent availability, in a fixed precedence: Killed first,
-then Failed, then NoChanges, then Deliver or NoAgent. "Agent present" SHALL
-require both `HERDR_GITUI_CALLER_PANE` and `HERDR_GITUI_CALLER_AGENT` to be
-set to non-blank values (src/session.rs:53-68,172-173,293,426-431).
+The plugin SHALL decide the session outcome from the selected TUI's exit code, the summary text, and agent availability, in the existing fixed precedence: Killed first, then Failed, then NoChanges, then Deliver or NoAgent. Agent presence SHALL continue to require both `HERDR_GITUI_CALLER_PANE` and `HERDR_GITUI_CALLER_AGENT` to be non-blank.
 
 #### Scenario: Missing exit code wins over everything else
 
-- **WHEN** gitui terminates without an exit code (killed by a signal), regardless of summary content or caller environment variables
+- **WHEN** either supported TUI terminates without an exit code, regardless of summary content or caller environment variables
 - **THEN** the outcome is Killed
 
 #### Scenario: Non-zero exit code beats summary and agent checks
 
-- **WHEN** gitui exits with a non-zero code, even with a non-empty summary and both caller variables set
+- **WHEN** either supported TUI exits with a non-zero code, even with a non-empty summary and both caller variables set
 - **THEN** the outcome is Failed carrying that exit code
 
 #### Scenario: Clean exit with empty summary is NoChanges
 
-- **WHEN** gitui exits with code 0 and the summary is empty or whitespace-only, even when both caller variables are set
-- **THEN** the outcome is NoChanges, not Deliver
+- **WHEN** either supported TUI exits with code 0 and the summary is empty or whitespace-only, even when both caller variables are set
+- **THEN** the outcome is NoChanges
 
 #### Scenario: Clean exit with summary and caller decides Deliver vs NoAgent
 
-- **WHEN** gitui exits with code 0 and the summary is non-empty
-- **THEN** the outcome is Deliver when both `HERDR_GITUI_CALLER_PANE` and `HERDR_GITUI_CALLER_AGENT` are non-blank, and NoAgent when either is missing or blank
+- **WHEN** either supported TUI exits with code 0 and the summary is non-empty
+- **THEN** the outcome is Deliver when both caller variables are non-blank, and NoAgent when either is missing or blank
 
 ### Requirement: Error outcomes report, keep evidence, and hold the pane
 
@@ -96,23 +113,11 @@ message, hold the pane, and exit with code 0 on success
 
 ### Requirement: Best-effort pane teardown
 
-The plugin's pane teardown SHALL attempt `herdr plugin pane close
-$HERDR_PANE_ID` via the herdr binary and, when that id is missing or the call
-fails, fall back to `herdr tab close $HERDR_TAB_ID`; all failures are logged
-to stderr and never propagated (src/session.rs:359-373,370-382). When the
-session runs as a popup — the pane process sees `HERDR_GITUI_PLACEMENT=popup`
-in its environment, exported by the action — the teardown SHALL make no herdr
-call at all: neither `plugin pane close` nor the tab-close fallback. A popup
-is a singleton session resource rather than a Herdr pane: its process does
-not receive `HERDR_PANE_ID` for itself, and the plugin context its
-environment carries points at the underlying tiled caller pane, so any
-close-the-own-pane call would target the user's agent pane; the popup closes
-naturally when the session process exits (herdr-side behavior). Summary
-delivery is unaffected by the popup gate because it addresses
-`HERDR_GITUI_CALLER_PANE`, not the session's own pane id. The pane hold its
-outcomes invoke is specified by the mode-dispatch capability (see "Hold waits
-for one Enter and never hangs on closed stdin"); the hold mechanism is not
-re-specified here.
+For tab sessions, teardown SHALL try to close the pane by its pane id and
+fall back to closing its tab when the pane id is missing or the call fails.
+Failures SHALL be logged and never propagated. Popup sessions SHALL make no
+teardown callback because they close when their process exits. Delivery
+continues to target the caller pane, and hold behavior follows mode-dispatch.
 
 #### Scenario: Pane close succeeds
 
@@ -141,17 +146,17 @@ re-specified here.
 
 ### Requirement: Session file location, naming, and content
 
-Session summaries SHALL be stored directly under `<state-dir>/sessions/`,
-where state-dir is the non-blank `HERDR_PLUGIN_STATE_DIR` environment variable
-or the system temp directory when it is absent or blank. The pane start SHALL
-create that directory (recursively) and treat failure as fatal. Each file
-SHALL be named `<pid>-<unix millis>.txt` and contain the raw summary text
-with no header (src/session.rs:144-147,352-357,384-388,420-424).
+Session summaries SHALL be stored under `<state-dir>/sessions/`, where
+state-dir is non-blank `HERDR_PLUGIN_STATE_DIR` or the system temporary
+directory. Pane start SHALL create the directory recursively and fail if it
+cannot. Files SHALL use `<pid>-<unix millis>.txt`, begin with the selected
+tool label, and contain the summary from read-only snapshots. The plugin
+SHALL NOT read the files after writing them.
 
 #### Scenario: File name carries pid and timestamp
 
 - **WHEN** a summary is written for a process with pid 4242 at unix milliseconds 1700000000000
-- **THEN** the file is named `4242-1700000000000.txt` in the sessions directory and its content is exactly the summary text
+- **THEN** the file is named `4242-1700000000000.txt` in the sessions directory and its content begins with the selected tool label followed by the summary
 
 #### Scenario: State dir override and fallback
 
@@ -166,7 +171,17 @@ with no header (src/session.rs:144-147,352-357,384-388,420-424).
 #### Scenario: Contents are never read back
 
 - **WHEN** the plugin works with session files after writing one
-- **THEN** the plugin never reads a session file's contents back — the file is a backup copy; only the sessions directory is listed, and only for pruning (src/session.rs:393-418)
+- **THEN** the plugin never reads a session file's contents back — the file is a backup copy; only the sessions directory is listed, and only for pruning
+
+#### Scenario: gitui summary identifies its tool
+
+- **WHEN** gitui produces a non-empty session summary
+- **THEN** the stored and delivered summary begins with `gitui session summary:`
+
+#### Scenario: lazygit summary identifies its tool
+
+- **WHEN** lazygit produces a non-empty session summary
+- **THEN** the stored and delivered summary begins with `lazygit session summary:`
 
 ### Requirement: Pruning of kept session files
 

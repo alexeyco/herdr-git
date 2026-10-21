@@ -1,14 +1,110 @@
 //! Minimal client over the herdr CLI (`HERDR_BIN_PATH`).
 
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::features::action::ports::{
+    Herdr as HerdrPort, PaneOpen as ActionPaneOpen, PickerPopupRequest as ActionPickerRequest,
+    SelectedToolPaneRequest as ActionSelectedRequest,
+};
+use crate::features::session::ports::Herdr as SessionHerdrPort;
 use crate::settings::{Direction, Placement};
+
+/// Concrete action-facing adapter over this module's Herdr CLI operations.
+pub(crate) struct HerdrAdapter;
+
+impl HerdrPort for HerdrAdapter {
+    fn open_setup_popup(&self) -> Result<(), String> {
+        open_setup_popup()
+    }
+
+    fn open_picker_popup(&self, request: ActionPickerRequest) -> Result<(), String> {
+        open_picker_popup(PickerPopupRequest {
+            cwd: &request.cwd,
+            gitui_path: request.gitui_path.as_deref(),
+            lazygit_path: request.lazygit_path.as_deref(),
+            last_tool: request.last_tool.as_deref().and_then(|tool| match tool {
+                "gitui" => Some("gitui"),
+                "lazygit" => Some("lazygit"),
+                _ => None,
+            }),
+            workspace_id: request.workspace_id.as_deref(),
+            caller_pane: request.caller_pane.as_deref(),
+            caller_agent: request.caller_agent.as_deref(),
+            caller_tab: request.caller_tab.as_deref(),
+            selection_file: request.selection_file.as_deref(),
+        })
+    }
+
+    fn open_selected_tool_pane(
+        &self,
+        request: ActionSelectedRequest,
+    ) -> Result<ActionPaneOpen, String> {
+        let result = selected_tool_pane_open(SelectedToolPaneRequest {
+            context: PaneOpenContext {
+                placement: request.placement,
+                direction: request.direction,
+                popup_size: PopupSize {
+                    width: request.popup_size.width.as_deref(),
+                    height: request.popup_size.height.as_deref(),
+                },
+                workspace_id: request.workspace_id.as_deref(),
+                cwd: &request.cwd,
+                caller_pane: request.caller_pane.as_deref(),
+                caller_agent: request.caller_agent.as_deref(),
+            },
+            tool_id: &request.tool_id,
+            tool_path: &request.tool_path,
+            caller_tab: request.caller_tab.as_deref(),
+        })?;
+        Ok(match result {
+            PaneOpen::Pane { pane_id, tab_id } => ActionPaneOpen::Pane { pane_id, tab_id },
+            PaneOpen::Popup => ActionPaneOpen::Popup,
+        })
+    }
+
+    fn close_picker_popup(&self) -> Result<(), String> {
+        popup_close()
+    }
+
+    fn focus_tab(&self, tab_id: String) -> Result<String, String> {
+        tab_focus(&tab_id)
+    }
+}
+
+impl SessionHerdrPort for HerdrAdapter {
+    fn require_bin(&self) -> Result<(), String> {
+        require_bin()
+    }
+
+    fn agent_prompt(&self, target_pane: &str, text: &str) -> Result<(), String> {
+        agent_prompt(target_pane, text)
+    }
+
+    fn close_pane(&self, pane_id: &str) -> Result<(), String> {
+        pane_close(pane_id)
+    }
+
+    fn close_tab(&self, tab_id: &str) -> Result<(), String> {
+        tab_close(tab_id)
+    }
+
+    fn focus_tab(&self, tab_id: &str) -> Result<String, String> {
+        tab_focus(tab_id)
+    }
+}
 
 /// Runs the herdr binary with `args`, returning stdout on success.
 fn exec(args: &[&str]) -> Result<String, String> {
-    let bin = herdr_bin()?;
+    exec_with_bin(args, herdr_bin())
+}
+
+fn exec_with_bin(args: &[&str], bin: Result<String, String>) -> Result<String, String> {
+    let bin = bin?;
     let output = Command::new(&bin)
         .args(args)
         .output()
@@ -28,8 +124,12 @@ fn exec(args: &[&str]) -> Result<String, String> {
 }
 
 fn herdr_bin() -> Result<String, String> {
-    match std::env::var("HERDR_BIN_PATH") {
-        Ok(v) if !v.trim().is_empty() => Ok(v),
+    herdr_bin_from(std::env::var("HERDR_BIN_PATH").ok().as_deref())
+}
+
+fn herdr_bin_from(value: Option<&str>) -> Result<String, String> {
+    match value {
+        Some(v) if !v.trim().is_empty() => Ok(v.to_string()),
         _ => Err(
             "herdr did not provide HERDR_BIN_PATH (plugin API v1 contract); cannot call back into herdr"
                 .to_string(),
@@ -43,40 +143,190 @@ pub(crate) fn require_bin() -> Result<(), String> {
     herdr_bin().map(|_| ())
 }
 
-/// Opens the `gitui` plugin pane, returning the parsed reply.
-///
-/// `placement` and `direction` are the typed settings loaded once per action
-/// launch (`settings::Settings::load`); `popup_size` carries the resolved
-/// `width`/`height` tokens, used only for `popup`. `pane_open_args` owns the
-/// exhaustive mapping to argv values, including the caller-pane fallback.
-/// With the defaults the argv is byte-identical to the historical
-/// `--placement tab` form.
-pub(crate) fn plugin_pane_open(
-    placement: Placement,
-    direction: Direction,
-    popup_size: PopupSize<'_>,
-    workspace_id: Option<&str>,
-    cwd: &str,
-    caller_pane: Option<&str>,
-    caller_agent: Option<&str>,
+/// Context preserved from action mode when opening a plugin pane.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PaneOpenContext<'a> {
+    pub(crate) placement: Placement,
+    pub(crate) direction: Direction,
+    pub(crate) popup_size: PopupSize<'a>,
+    pub(crate) workspace_id: Option<&'a str>,
+    pub(crate) cwd: &'a str,
+    pub(crate) caller_pane: Option<&'a str>,
+    pub(crate) caller_agent: Option<&'a str>,
+}
+
+/// Selected-tool data for opening the session pane.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SelectedToolPaneRequest<'a> {
+    pub(crate) context: PaneOpenContext<'a>,
+    pub(crate) tool_id: &'a str,
+    pub(crate) tool_path: &'a str,
+    pub(crate) caller_tab: Option<&'a str>,
+}
+
+/// Opens the session pane for the tool selected in action mode.
+pub(crate) fn selected_tool_pane_open(
+    request: SelectedToolPaneRequest<'_>,
 ) -> Result<PaneOpen, String> {
-    let args = pane_open_args(
-        placement,
-        direction,
-        popup_size,
-        workspace_id,
-        cwd,
-        caller_pane,
-        caller_agent,
+    let args = selected_tool_pane_args(request);
+    open_pane_args(&args, request.context.placement)
+}
+
+fn selected_tool_pane_args(request: SelectedToolPaneRequest<'_>) -> Vec<String> {
+    let SelectedToolPaneRequest {
+        context,
+        tool_id,
+        tool_path,
+        caller_tab,
+    } = request;
+    let mut args = pane_open_args(
+        context.placement,
+        context.direction,
+        context.popup_size,
+        context.workspace_id,
+        context.cwd,
+        context.caller_pane,
+        context.caller_agent,
     );
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let focus = args.pop().expect("pane_open_args always ends with --focus");
+    args.extend([
+        "--env".to_string(),
+        format!("HERDR_GIT_TOOL={tool_id}"),
+        "--env".to_string(),
+        format!("HERDR_GIT_TOOL_PATH={tool_path}"),
+    ]);
+    if let Some(workspace) = context.workspace_id {
+        args.extend([
+            "--env".to_string(),
+            format!("HERDR_GITUI_WORKSPACE_ID={workspace}"),
+        ]);
+    }
+    if context.placement != Placement::Popup
+        && let Some(tab) = caller_tab
+    {
+        args.extend(["--env".to_string(), format!("HERDR_GITUI_CALLER_TAB={tab}")]);
+    }
+    args.push(focus);
+    args
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SelectionPopupRequest<'a> {
+    entrypoint: &'a str,
+    cwd: Option<&'a str>,
+    gitui_path: Option<&'a str>,
+    lazygit_path: Option<&'a str>,
+    last_tool: Option<&'a str>,
+    workspace_id: Option<&'a str>,
+    caller_pane: Option<&'a str>,
+    caller_agent: Option<&'a str>,
+    caller_tab: Option<&'a str>,
+    selection_file: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PickerPopupRequest<'a> {
+    pub(crate) cwd: &'a str,
+    pub(crate) gitui_path: Option<&'a str>,
+    pub(crate) lazygit_path: Option<&'a str>,
+    pub(crate) last_tool: Option<&'static str>,
+    pub(crate) workspace_id: Option<&'a str>,
+    pub(crate) caller_pane: Option<&'a str>,
+    pub(crate) caller_agent: Option<&'a str>,
+    pub(crate) caller_tab: Option<&'a str>,
+    pub(crate) selection_file: Option<&'a str>,
+}
+
+/// Opens the setup popup when neither supported TUI is installed.
+pub(crate) fn open_setup_popup() -> Result<(), String> {
+    open_selection_popup(SelectionPopupRequest {
+        entrypoint: "setup",
+        cwd: None,
+        gitui_path: None,
+        lazygit_path: None,
+        last_tool: None,
+        workspace_id: None,
+        caller_pane: None,
+        caller_agent: None,
+        caller_tab: None,
+        selection_file: None,
+    })
+}
+
+/// Opens the picker popup, forwarding tool paths, saved preference, and the
+/// action context needed when the picker requests a session pane.
+pub(crate) fn open_picker_popup(request: PickerPopupRequest<'_>) -> Result<(), String> {
+    open_selection_popup(SelectionPopupRequest {
+        entrypoint: "picker",
+        cwd: Some(request.cwd),
+        gitui_path: request.gitui_path,
+        lazygit_path: request.lazygit_path,
+        last_tool: request.last_tool,
+        workspace_id: request.workspace_id,
+        caller_pane: request.caller_pane,
+        caller_agent: request.caller_agent,
+        caller_tab: request.caller_tab,
+        selection_file: request.selection_file,
+    })
+}
+
+fn open_selection_popup(request: SelectionPopupRequest<'_>) -> Result<(), String> {
+    let args = selection_popup_args(request);
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    exec(&refs).map(|_| ())
+}
+
+fn selection_popup_args(request: SelectionPopupRequest<'_>) -> Vec<String> {
+    let mut args = vec![
+        "plugin",
+        "pane",
+        "open",
+        "--plugin",
+        "alexeyco.git",
+        "--entrypoint",
+        request.entrypoint,
+        "--placement",
+        "popup",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    if request.entrypoint == "picker" {
+        args.extend([
+            "--width".to_string(),
+            "24".to_string(),
+            "--height".to_string(),
+            "6".to_string(),
+        ]);
+    }
+    if let Some(dir) = request.cwd {
+        args.extend(["--cwd".to_string(), dir.to_string()]);
+    }
+    for (key, value) in [
+        ("HERDR_GITUI_PATH", request.gitui_path),
+        ("HERDR_LAZYGIT_PATH", request.lazygit_path),
+        ("HERDR_GIT_LAST_TOOL", request.last_tool),
+        ("HERDR_GITUI_WORKSPACE_ID", request.workspace_id),
+        ("HERDR_GITUI_CALLER_PANE", request.caller_pane),
+        ("HERDR_GITUI_CALLER_AGENT", request.caller_agent),
+        ("HERDR_GITUI_CALLER_TAB", request.caller_tab),
+        ("HERDR_GIT_SELECTION_FILE", request.selection_file),
+    ] {
+        if let Some(value) = value {
+            args.extend(["--env".to_string(), format!("{key}={value}")]);
+        }
+    }
+    args.push("--focus".to_string());
+    args
+}
+
+fn open_pane_args(args: &[String], placement: Placement) -> Result<PaneOpen, String> {
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let out = exec(&refs)?;
-    // Parse against the requested placement: only `popup` is exempt from the
-    // pane-id requirement and popup never degrades to another placement.
     parse_pane_open(&out, placement)
 }
 
-/// Queries the plugin config directory with `herdr plugin config-dir gitui`.
+/// Queries the plugin config directory with `herdr plugin config-dir alexeyco.git`.
 /// The reply is a bare path line (confirmed on herdr 0.9.5), not a JSON
 /// envelope, so nothing is parsed beyond trimming stdout: a single non-blank
 /// line is the directory. A blank reply, a multi-line reply, or a failed
@@ -84,7 +334,7 @@ pub(crate) fn plugin_pane_open(
 /// settings layer maps to a "config directory unavailable" warning plus
 /// defaults — never an action failure.
 pub(crate) fn plugin_config_dir() -> Result<String, String> {
-    let out = exec(&["plugin", "config-dir", "gitui"])?;
+    let out = exec(&["plugin", "config-dir", "alexeyco.git"])?;
     parse_config_dir(&out)
 }
 
@@ -147,7 +397,7 @@ fn placement_value(placement: Placement) -> &'static str {
 }
 
 /// `herdr plugin pane open` argv in a fixed order: `plugin pane open`,
-/// `--plugin gitui`, `--entrypoint open`, the config-driven
+/// `--plugin alexeyco.git`, `--entrypoint open`, the config-driven
 /// `--placement <value>`, `--width <v>`/`--height <v>` immediately after the
 /// placement value only for `popup` with the corresponding valid size
 /// setting (each pair independently, values verbatim), `--direction
@@ -196,7 +446,7 @@ pub(crate) fn pane_open_args(
         "pane".to_string(),
         "open".to_string(),
         "--plugin".to_string(),
-        "gitui".to_string(),
+        "alexeyco.git".to_string(),
         "--entrypoint".to_string(),
         "open".to_string(),
         // The manifest stays `placement = "tab"`: that value is declarative
@@ -337,9 +587,73 @@ pub(crate) fn tab_focus_args(tab_id: &str) -> Vec<String> {
 /// Focuses a tab by id. Used as a best-effort re-assert after opening the
 /// gitui pane; herdr already applies `--focus` at open.
 pub(crate) fn tab_focus(tab_id: &str) -> Result<String, String> {
+    tab_focus_with_bin(tab_id, herdr_bin())
+}
+
+/// Closes the active picker popup through Herdr's socket API. There is no CLI
+/// wrapper for `popup.close`; the action process owns this call so closing the
+/// popup cannot terminate the process that opens the selected TUI.
+pub(crate) fn popup_close() -> Result<(), String> {
+    let path = std::env::var("HERDR_SOCKET_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "herdr did not provide HERDR_SOCKET_PATH; cannot close picker popup".to_string()
+        })?;
+    popup_close_at(Path::new(&path))
+}
+
+#[cfg(unix)]
+fn popup_close_at(path: &Path) -> Result<(), String> {
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(path)
+        .map_err(|error| format!("cannot connect to herdr socket {}: {error}", path.display()))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| format!("cannot set herdr socket timeout: {error}"))?;
+    popup_close_exchange(&mut stream)
+}
+
+fn popup_close_exchange(stream: &mut (impl Read + Write)) -> Result<(), String> {
+    let request = serde_json::json!({
+        "id": "herdr-git-popup-close",
+        "method": "popup.close",
+        "params": {},
+    });
+    serde_json::to_writer(&mut *stream, &request)
+        .map_err(|error| format!("cannot encode popup.close request: {error}"))?;
+    stream
+        .write_all(b"\n")
+        .map_err(|error| format!("cannot send popup.close request: {error}"))?;
+
+    let mut response = String::new();
+    BufReader::new(&mut *stream)
+        .read_line(&mut response)
+        .map_err(|error| format!("cannot read popup.close response: {error}"))?;
+    let response: Value = serde_json::from_str(&response)
+        .map_err(|error| format!("invalid popup.close response: {error}"))?;
+    if response["error"]["code"] == "popup_not_open" {
+        return Ok(());
+    }
+    if let Some(error) = response.get("error") {
+        return Err(format!("herdr popup.close failed: {error}"));
+    }
+    if response["id"] != "herdr-git-popup-close" || response.get("result").is_none() {
+        return Err(format!("invalid popup.close response: {response}"));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn popup_close_at(_path: &Path) -> Result<(), String> {
+    Err("popup.close requires a Unix socket".to_string())
+}
+
+fn tab_focus_with_bin(tab_id: &str, bin: Result<String, String>) -> Result<String, String> {
     let args = tab_focus_args(tab_id);
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    exec(&refs)
+    exec_with_bin(&refs, bin)
 }
 
 /// Submits `text` to the agent hosted in `target_pane`.
@@ -359,13 +673,141 @@ fn snippet(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     const PANE_OPEN: &str = concat!(
-        r#"{"ok":true,"result":{"plugin_pane":{"plugin_id":"gitui","entrypoint":"open","#,
+        r#"{"ok":true,"result":{"plugin_pane":{"plugin_id":"alexeyco.git","entrypoint":"open","#,
         r#""pane":{"pane_id":"pane-1","tab_id":"tab-1","workspace_id":"ws-1","cwd":"/repo"}}}}"#
     );
     /// The popup reply verified live on herdr 0.9.5: no pane id, no tab id.
     const POPUP_OK: &str = r#"{"id":"cli:plugin","result":{"type":"ok"}}"#;
+
+    #[test]
+    fn selected_session_pane_args_forward_caller_tab() {
+        let args = selected_tool_pane_args(SelectedToolPaneRequest {
+            context: PaneOpenContext {
+                placement: Placement::Tab,
+                direction: Direction::Right,
+                popup_size: PopupSize::default(),
+                workspace_id: None,
+                cwd: "/repo",
+                caller_pane: None,
+                caller_agent: None,
+            },
+            tool_id: "lazygit",
+            tool_path: "/canonical/bin/lazygit",
+            caller_tab: Some("tab-1"),
+        });
+        let got = args.iter().map(String::as_str).collect::<Vec<_>>();
+
+        assert_eq!(
+            got,
+            [
+                "plugin",
+                "pane",
+                "open",
+                "--plugin",
+                "alexeyco.git",
+                "--entrypoint",
+                "open",
+                "--placement",
+                "tab",
+                "--cwd",
+                "/repo",
+                "--env",
+                "HERDR_GITUI_DIR=/repo",
+                "--env",
+                "HERDR_GIT_TOOL=lazygit",
+                "--env",
+                "HERDR_GIT_TOOL_PATH=/canonical/bin/lazygit",
+                "--env",
+                "HERDR_GITUI_CALLER_TAB=tab-1",
+                "--focus",
+            ]
+        );
+    }
+
+    #[test]
+    fn selected_session_pane_args_are_exact_with_minimal_context() {
+        let args = selected_tool_pane_args(SelectedToolPaneRequest {
+            context: PaneOpenContext {
+                placement: Placement::Tab,
+                direction: Direction::Right,
+                popup_size: PopupSize::default(),
+                workspace_id: None,
+                cwd: "/repo",
+                caller_pane: None,
+                caller_agent: None,
+            },
+            tool_id: "gitui",
+            tool_path: "/canonical/bin/gitui",
+            caller_tab: None,
+        });
+        let got = args.iter().map(String::as_str).collect::<Vec<_>>();
+
+        assert_eq!(
+            got,
+            [
+                "plugin",
+                "pane",
+                "open",
+                "--plugin",
+                "alexeyco.git",
+                "--entrypoint",
+                "open",
+                "--placement",
+                "tab",
+                "--cwd",
+                "/repo",
+                "--env",
+                "HERDR_GITUI_DIR=/repo",
+                "--env",
+                "HERDR_GIT_TOOL=gitui",
+                "--env",
+                "HERDR_GIT_TOOL_PATH=/canonical/bin/gitui",
+                "--focus",
+            ]
+        );
+    }
+
+    struct MockSocket {
+        request: Vec<u8>,
+        response: Cursor<Vec<u8>>,
+    }
+
+    impl Read for MockSocket {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.response.read(buffer)
+        }
+    }
+
+    impl Write for MockSocket {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.request.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn popup_close_sends_socket_request_and_accepts_already_closed_popup() {
+        for response in [
+            r#"{"id":"herdr-git-popup-close","result":{"type":"ok"}}"#,
+            r#"{"id":"herdr-git-popup-close","error":{"code":"popup_not_open","message":"no popup"}}"#,
+        ] {
+            let mut socket = MockSocket {
+                request: Vec::new(),
+                response: Cursor::new(format!("{response}\n").into_bytes()),
+            };
+            popup_close_exchange(&mut socket).unwrap();
+            let request: Value = serde_json::from_slice(&socket.request).unwrap();
+            assert_eq!(request["method"], "popup.close");
+            assert_eq!(request["params"], serde_json::json!({}));
+        }
+    }
 
     #[test]
     fn parses_pane_open_success() {
@@ -477,7 +919,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.git",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -516,7 +958,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.git",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -549,7 +991,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.git",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -586,7 +1028,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.git",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -628,7 +1070,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.git",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -671,7 +1113,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.git",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -712,7 +1154,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.git",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -755,7 +1197,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.git",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -799,7 +1241,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.git",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -848,7 +1290,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.git",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -952,7 +1394,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.git",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -991,7 +1433,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "gitui",
+                "alexeyco.git",
                 "--entrypoint",
                 "open",
                 "--placement",
@@ -1052,6 +1494,105 @@ mod tests {
         let args = tab_focus_args("tab-1");
         let got: Vec<&str> = args.iter().map(String::as_str).collect();
         assert_eq!(got, ["tab", "focus", "tab-1"]);
+    }
+
+    #[test]
+    fn tab_focus_uses_the_shared_bin_path_guard() {
+        let expected = "herdr did not provide HERDR_BIN_PATH (plugin API v1 contract); cannot call back into herdr";
+        for value in [None, Some("   ")] {
+            let err = tab_focus_with_bin("tab-1", herdr_bin_from(value)).unwrap_err();
+            assert_eq!(err, expected);
+        }
+    }
+
+    #[test]
+    fn setup_popup_uses_its_dedicated_entrypoint() {
+        let args = selection_popup_args(SelectionPopupRequest {
+            entrypoint: "setup",
+            cwd: None,
+            gitui_path: None,
+            lazygit_path: None,
+            last_tool: None,
+            workspace_id: None,
+            caller_pane: None,
+            caller_agent: None,
+            caller_tab: None,
+            selection_file: None,
+        });
+        let got = args.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            [
+                "plugin",
+                "pane",
+                "open",
+                "--plugin",
+                "alexeyco.git",
+                "--entrypoint",
+                "setup",
+                "--placement",
+                "popup",
+                "--focus",
+            ]
+        );
+    }
+
+    #[test]
+    fn picker_popup_passes_available_tools_preference_and_action_context() {
+        let args = selection_popup_args(SelectionPopupRequest {
+            entrypoint: "picker",
+            cwd: Some("/repo"),
+            gitui_path: Some("/bin/gitui"),
+            lazygit_path: Some("/bin/lazygit"),
+            last_tool: Some("lazygit"),
+            workspace_id: Some("ws-1"),
+            caller_pane: Some("pane-1"),
+            caller_agent: Some("agent-1"),
+            caller_tab: Some("tab-1"),
+            selection_file: Some("/tmp/picker-ticket"),
+        });
+        let got = args.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            &got[..15],
+            [
+                "plugin",
+                "pane",
+                "open",
+                "--plugin",
+                "alexeyco.git",
+                "--entrypoint",
+                "picker",
+                "--placement",
+                "popup",
+                "--width",
+                "24",
+                "--height",
+                "6",
+                "--cwd",
+                "/repo",
+            ]
+        );
+        assert!(
+            !got.iter()
+                .any(|arg| matches!(*arg, "--workspace" | "--target-pane" | "--direction")),
+            "selection popups must not request pane targeting: {got:?}"
+        );
+        for value in [
+            "HERDR_GITUI_PATH=/bin/gitui",
+            "HERDR_LAZYGIT_PATH=/bin/lazygit",
+            "HERDR_GIT_LAST_TOOL=lazygit",
+            "HERDR_GITUI_WORKSPACE_ID=ws-1",
+            "HERDR_GITUI_CALLER_PANE=pane-1",
+            "HERDR_GITUI_CALLER_AGENT=agent-1",
+            "HERDR_GITUI_CALLER_TAB=tab-1",
+            "HERDR_GIT_SELECTION_FILE=/tmp/picker-ticket",
+        ] {
+            assert!(
+                got.windows(2).any(|pair| pair == ["--env", value]),
+                "{got:?}"
+            );
+        }
+        assert_eq!(got.last(), Some(&"--focus"));
     }
 
     #[test]

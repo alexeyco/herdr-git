@@ -1,88 +1,85 @@
-# gitui-integration
+# GitUI integration
 
 ## Purpose
 
-This capability covers how the plugin locates the `gitui` binary and launches
-it for a repository session. gitui is expected to be installed by the user and
-found on `PATH`; the plugin never installs, updates, or version-checks it.
-Resolution and launch happen only in pane mode: the action mode opens the pane
-and exits without ever touching gitui. Once pane mode starts, it picks the
-repository directory, resolves gitui to a canonical absolute path, prints a
-single banner line, and spawns gitui as a direct argument-less child confined
-to that directory, waiting for it to exit before the session result is handed
-to outcome mapping (specified separately under `session-outcomes`).
+This capability covers discovery and launch of the supported `gitui` and `lazygit` binaries for repository sessions. Both tools are expected to be installed by the user and found on `PATH`; the plugin never installs or version-checks them. Action mode discovers and selects an installed tool before opening a pane. Pane mode validates and launches that selected canonical path in the repository directory, then waits for it to exit before the session result is handed to outcome mapping (specified separately under `session-outcomes`).
 
 ## Requirements
 
 ### Requirement: gitui is resolved from PATH only
 
-The plugin SHALL locate gitui by scanning the `PATH` environment variable
-(treated as empty when unset), splitting it into directories, skipping empty
-entries, and selecting the first `gitui` candidate that is a regular file with
-any executable bit set (Unix mode `& 0o111 != 0`; on non-Unix platforms any
-regular file qualifies). There SHALL be no override environment variable, no
-configuration, and no minimum gitui version check.
-(`src/gitui.rs:16-19,32-41,55-71`)
+The plugin SHALL resolve `gitui` and `lazygit` by scanning `PATH` for the first regular executable candidate of each name, skipping empty entries, and canonicalize each selected path to an absolute path before launching it. There SHALL be no binary override setting and no minimum-version check for either tool. Action mode performs discovery and selection; pane mode launches the selected canonical path.
 
 #### Scenario: First executable entry wins
 
-- **WHEN** two `PATH` directories each contain an executable `gitui` file
-- **THEN** the candidate from the earlier directory is selected
+- **WHEN** multiple `PATH` directories contain executable candidates for either supported tool
+- **THEN** the candidate from the earliest directory is selected for that tool
 
 #### Scenario: Non-executable candidate is skipped and search continues
 
-- **WHEN** the first `PATH` directory contains a `gitui` file with mode 0644
-  (no executable bit) and a later directory contains an executable `gitui`
-- **THEN** the non-executable file is skipped and the later executable one is
-  selected
+- **WHEN** an earlier `PATH` directory contains a non-executable candidate and a later directory contains an executable candidate for the same supported tool
+- **THEN** the non-executable file is skipped and the later executable one is selected
 
 #### Scenario: gitui missing from PATH
 
-- **WHEN** no `PATH` entry contains an executable `gitui`
-- **THEN** resolution fails with the message
-  `gitui not found on PATH; install it from https://github.com/gitui-org/gitui`
-  (`src/gitui.rs:12,27`)
+- **WHEN** neither supported tool is available on `PATH`
+- **THEN** action mode shows setup guidance with installation links for gitui and lazygit and does not open a pane
 
-### Requirement: The resolved path is canonicalized to an absolute path
+#### Scenario: Selected tool path is absolute
 
-The selected candidate SHALL be canonicalized to an absolute path before use.
-There SHALL be no working-directory fallback: a candidate that cannot be
-canonicalized is a hard error, because the action and pane processes can have
-different working directories. Relative `PATH` entries still resolve to an
-absolute result. (`src/gitui.rs:43-53`)
+- **WHEN** the selected tool candidate is found through a relative `PATH` entry
+- **THEN** the path passed to pane mode is canonical and absolute
 
-#### Scenario: Relative PATH entry resolves to absolute
+### Requirement: gitui is launched as a direct argument-less child and awaited to exit
 
-- **WHEN** a `PATH` entry is relative (e.g. `.`) and contains an executable
-  `gitui`
-- **THEN** the resolved path is absolute and points at that same file
+Pane mode SHALL launch the selected canonical `gitui` or `lazygit` binary as an argument-less direct child, with the existing repository directory as `current_dir`, inherit pane stdio, and wait for its exit status. Before and after git snapshots SHALL remain read-only and surround the selected TUI process.
 
-#### Scenario: Canonicalization failure
+#### Scenario: Clean launch
 
-- **WHEN** the first executable candidate cannot be canonicalized
-- **THEN** resolution fails with the message
-  `found gitui at <candidate> but cannot resolve it to an absolute path: <error>`
+- **WHEN** a selected supported tool is resolved and the repository directory is set
+- **THEN** the plugin prints its tool-specific start line before spawning the selected TUI with no arguments in that directory, and waits for it to exit
 
-### Requirement: gitui resolution happens in pane mode before any user-visible output
+#### Scenario: Child inherits the pane stdio
 
-Pane mode SHALL resolve gitui after checking `HERDR_BIN_PATH`, resolving the
-repository directory, and creating/pruning the sessions directory, and before
-taking the before-snapshot or printing anything to stdout, so a missing binary
-fails without visible output. Action mode SHALL NOT resolve gitui at all.
-(`src/session.rs:133-156`, `src/session.rs:95-129`, `src/herdr.rs:38-42`)
+- **WHEN** the selected TUI is spawned
+- **THEN** the plugin does not reconfigure stdio and the child inherits the pane process stdio unchanged
 
-#### Scenario: Missing binary fails before any banner
+#### Scenario: No positional path and no -d
 
-- **WHEN** pane mode starts and no executable `gitui` exists on `PATH`
-- **THEN** the plugin returns the not-found error without running a git
-  snapshot and without printing the `herdr-gitui: starting gitui ...` line
+- **WHEN** either supported TUI is launched for a repository directory
+- **THEN** it discovers the repository from its working directory and receives no positional path or `-d` flag
 
-#### Scenario: Action mode never checks gitui availability
+#### Scenario: Spawn failure
 
-- **WHEN** the binary runs in action mode
-- **THEN** it resolves the repository context and asks herdr to open the pane
-  without ever calling gitui resolution; a missing gitui cannot fail the
-  action process itself
+- **WHEN** spawning the resolved selected binary fails
+- **THEN** pane mode reports the existing launch error with the selected binary path and directory
+
+### Requirement: Action mode selects the installed tool before opening a pane
+
+Action mode SHALL apply the `tool-selection` capability before opening a pane.
+Pane mode SHALL launch the selected tool and SHALL NOT independently select a
+different tool. It SHALL validate the selected path before taking a
+before-snapshot or printing the session banner.
+
+#### Scenario: Action mode hands the selected tool to the pane
+
+- **WHEN** action mode selects an available tool and opens its pane
+- **THEN** pane mode launches that same tool and does not repeat interactive selection
+
+#### Scenario: Selected binary disappears before pane launch
+
+- **WHEN** the selected binary is unavailable when pane mode starts
+- **THEN** pane mode reports a launch error before taking a git snapshot or printing a start banner
+
+#### Scenario: No available tools prevents pane open
+
+- **WHEN** action mode finds neither supported tool
+- **THEN** it shows setup guidance and does not open a pane
+
+#### Scenario: Snapshot boundaries are unchanged
+
+- **WHEN** the selected TUI starts and exits
+- **THEN** the plugin takes the before-snapshot before launch and the after-snapshot after exit without mutating the git index or working tree
 
 ### Requirement: The launch directory is HERDR_GITUI_DIR or the process cwd
 
@@ -102,43 +99,3 @@ working-directory read failure SHALL produce the message
 - **WHEN** `HERDR_GITUI_DIR` is unset, empty, or whitespace-only
 - **THEN** the plugin uses the process working directory, and reports
   `cannot read current directory: <error>` if reading it fails
-
-### Requirement: gitui is launched as a direct argument-less child and awaited to exit
-
-Pane mode SHALL spawn the canonicalized gitui binary as an argument-less
-direct child with the repository directory as `current_dir`, block on
-`Command::status()` with no timeout until it exits, and pass the collected
-exit status to outcome mapping, specified under `session-outcomes`.
-(`src/session.rs:156-163`)
-
-UNVERIFIED: whether the inherited stdio lands on a real pane tty is herdr's
-external behavior; the plugin code only shows that stdio is not redirected.
-
-#### Scenario: Clean launch
-
-- **WHEN** gitui is resolved and the repository directory is set
-- **THEN** the plugin prints `herdr-gitui: starting gitui in <dir>` to stdout
-  before spawning, then spawns gitui with no arguments and `current_dir` set
-  to that directory, and waits indefinitely for it to exit
-
-#### Scenario: Child inherits the pane stdio
-
-- **WHEN** gitui is spawned
-- **THEN** the plugin does not reconfigure stdio: the child inherits the pane
-  process stdio unchanged
-
-#### Scenario: No positional path and no -d
-
-- **WHEN** gitui is launched for a repository directory
-- **THEN** gitui discovers the repo from its working directory; the plugin
-  passes no positional path and no `-d` flag, because `-d` means the git dir
-
-UNVERIFIED: the claim that gitui 0.28 rejects a positional path argument comes
-from the code comment at `src/session.rs:157-159`; this plugin never exercises
-gitui itself to prove it.
-
-#### Scenario: Spawn failure
-
-- **WHEN** spawning the resolved binary fails (e.g. the file disappeared after
-  resolution)
-- **THEN** the plugin returns `failed to run <gitui_bin> in <dir>: <error>`

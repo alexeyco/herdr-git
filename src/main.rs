@@ -12,13 +12,9 @@
 //! Plugin docs: https://herdr.dev/docs/plugins/
 //! gitui: https://github.com/gitui-org/gitui
 
-mod context;
-mod git;
-mod gitui;
-mod herdr;
-mod session;
+mod adapters;
+mod features;
 mod settings;
-mod summary;
 
 fn main() {
     if let Err(e) = run() {
@@ -26,7 +22,7 @@ fn main() {
         // Plugin panes auto-close when this process exits, so pane-mode errors
         // must block until the user has read the message.
         if env_set("HERDR_PLUGIN_ENTRYPOINT_ID") {
-            session::hold_pane();
+            features::session::hold_pane();
         }
         std::process::exit(1);
     }
@@ -35,8 +31,8 @@ fn main() {
 /// Which entry point the process should run.
 #[derive(Debug, PartialEq, Eq)]
 enum RunMode {
-    /// `HERDR_PLUGIN_ENTRYPOINT_ID` is set: running inside the gitui pane.
-    Pane,
+    /// `HERDR_PLUGIN_ENTRYPOINT_ID` is set: running inside a plugin pane.
+    Pane(String),
     /// `HERDR_PLUGIN_ACTION_ID` is set: running the action.
     Action,
     /// Neither is set: invoked outside herdr.
@@ -47,7 +43,10 @@ enum RunMode {
 /// both are set, matching herdr's action-spawns-pane nesting.
 fn run_mode() -> RunMode {
     if env_set("HERDR_PLUGIN_ENTRYPOINT_ID") {
-        RunMode::Pane
+        RunMode::Pane(
+            std::env::var("HERDR_PLUGIN_ENTRYPOINT_ID")
+                .expect("entrypoint is set when pane mode is selected"),
+        )
     } else if env_set("HERDR_PLUGIN_ACTION_ID") {
         RunMode::Action
     } else {
@@ -57,8 +56,19 @@ fn run_mode() -> RunMode {
 
 fn run() -> Result<(), String> {
     match run_mode() {
-        RunMode::Pane => session::run_pane(),
-        RunMode::Action => session::run_action(),
+        RunMode::Pane(entrypoint) => match entrypoint.as_str() {
+            "open" => features::session::run_pane(),
+            "picker" => features::picker_entry::run(),
+            "setup" => features::setup::run(),
+            unknown => Err(format!(
+                "unknown pane entrypoint '{unknown}'; expected one of: open, picker, setup"
+            )),
+        },
+        RunMode::Action => {
+            let herdr = adapters::herdr::HerdrAdapter;
+            let preferences = adapters::state::StateAdapter;
+            features::action::workflow::run(&herdr, &preferences)
+        }
         RunMode::Outside => Err("invoked outside herdr plugin context".to_string()),
     }
 }
@@ -124,7 +134,7 @@ mod tests {
     #[test]
     fn entrypoint_only_is_pane() {
         let _env = ModeEnv::set(Some("open"), None);
-        assert_eq!(run_mode(), RunMode::Pane);
+        assert_eq!(run_mode(), RunMode::Pane("open".to_string()));
     }
 
     #[test]
@@ -136,7 +146,7 @@ mod tests {
     #[test]
     fn both_set_prefers_pane() {
         let _env = ModeEnv::set(Some("open"), Some("open"));
-        assert_eq!(run_mode(), RunMode::Pane);
+        assert_eq!(run_mode(), RunMode::Pane("open".to_string()));
     }
 
     #[test]

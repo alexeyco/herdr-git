@@ -1,4 +1,4 @@
-# session-summary
+# Session summary
 
 ## Purpose
 

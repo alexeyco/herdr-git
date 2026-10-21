@@ -1,4 +1,4 @@
-# git-snapshot
+# Git snapshot
 
 ## Purpose
 

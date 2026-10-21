@@ -7,8 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::herdr;
-use crate::session::env_non_blank;
+use crate::adapters::herdr;
 
 /// Where herdr places the gitui pane. Action mode maps the variants to the
 /// `--placement` argv values `tab`, `split`, `overlay`, `zoomed`, `popup`.
@@ -85,13 +84,20 @@ impl Settings {
 
 /// Resolves the settings directory: a non-blank `HERDR_PLUGIN_CONFIG_DIR`
 /// wins outright and no callback is made; otherwise the HERDR_BIN_PATH-
-/// guarded `plugin config-dir gitui` query answers. The `Err` reason maps to
+/// guarded `plugin config-dir alexeyco.git` query answers. The `Err` reason maps to
 /// the single "config directory unavailable" warning plus defaults.
 fn resolve_config_dir() -> Result<PathBuf, String> {
     if let Some(dir) = env_non_blank("HERDR_PLUGIN_CONFIG_DIR") {
         return Ok(PathBuf::from(dir));
     }
     herdr::plugin_config_dir().map(PathBuf::from)
+}
+
+fn env_non_blank(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// Reads `<dir>/config.toml` once. A file that does not exist is silent

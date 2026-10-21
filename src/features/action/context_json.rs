@@ -10,6 +10,8 @@ pub(crate) struct Context {
     pub(crate) dir: String,
     /// `workspace_id`, when a non-blank string.
     pub(crate) workspace_id: Option<String>,
+    /// `tab_id`, when a non-blank string.
+    pub(crate) tab_id: Option<String>,
     /// `focused_pane_id`, when a non-blank string.
     pub(crate) focused_pane_id: Option<String>,
     /// `focused_pane_agent`, when a non-blank string.
@@ -26,6 +28,7 @@ pub(crate) fn parse(json: &str) -> Result<Context, String> {
     Ok(Context {
         dir,
         workspace_id: opt_string(&v, "workspace_id"),
+        tab_id: opt_string(&v, "tab_id"),
         focused_pane_id: opt_string(&v, "focused_pane_id"),
         focused_pane_agent: opt_string(&v, "focused_pane_agent"),
     })
@@ -82,6 +85,7 @@ mod tests {
         let ctx = parse(CTX).unwrap();
         assert_eq!(ctx.dir, "/home/u/demo");
         assert_eq!(ctx.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(ctx.tab_id.as_deref(), Some("t1"));
         assert_eq!(ctx.focused_pane_id.as_deref(), Some("p1"));
         assert_eq!(ctx.focused_pane_agent.as_deref(), Some("claude"));
     }

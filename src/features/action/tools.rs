@@ -1,52 +1,62 @@
-//! Locating the gitui binary.
+//! Locating supported Git TUI binaries.
 //!
-//! The path is resolved to a canonical absolute one before gitui reaches the
+//! Each path is resolved to a canonical absolute one before the tool reaches the
 //! pane process: herdr spawns that process with its own `PATH` and working
 //! directory, which may differ from the action process's. A candidate that
 //! cannot be canonicalized is an error rather than a cwd-relative guess.
 //!
-//! There is no env override: gitui is always resolved from `PATH`.
+//! There are no binary overrides: both tools are resolved from `PATH`.
 
 use std::path::{Path, PathBuf};
 
-const INSTALL_HINT: &str = "install it from https://github.com/gitui-org/gitui";
+const TOOLS: [&str; 2] = ["gitui", "lazygit"];
 
-/// Finds the first executable `gitui` on `PATH`, canonicalized to an absolute
-/// path.
-pub(crate) fn find_gitui() -> Result<String, String> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Tool {
+    pub(crate) id: &'static str,
+    pub(crate) path: String,
+}
+
+/// Finds supported tools on `PATH`, in deterministic gitui/lazygit order.
+pub(crate) fn discover() -> Result<Vec<Tool>, String> {
     let path = std::env::var("PATH").unwrap_or_default();
-    resolve_gitui(&path)
+    resolve_tools(&path)
 }
 
-/// Resolves gitui from `PATH`. Split out so the selection is testable without
-/// mutating the process environment.
-fn resolve_gitui(path: &str) -> Result<String, String> {
-    if let Some(found) = first_in_path(path)? {
-        return Ok(found.to_string_lossy().into_owned());
-    }
-    Err(format!("gitui not found on PATH; {INSTALL_HINT}"))
+fn resolve_tools(path: &str) -> Result<Vec<Tool>, String> {
+    TOOLS
+        .into_iter()
+        .filter_map(|id| match first_in_path(path, id) {
+            Ok(Some(path)) => Some(Ok(Tool {
+                id,
+                path: path.to_string_lossy().into_owned(),
+            })),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
 }
 
-/// Canonical absolute path of the first executable `gitui` among `PATH`
+/// Canonical absolute path of the first executable named `name` among `PATH`
 /// entries, in order. Empty entries are skipped.
-fn first_in_path(path: &str) -> Result<Option<PathBuf>, String> {
+fn first_in_path(path: &str, name: &str) -> Result<Option<PathBuf>, String> {
     let Some(candidate) = std::env::split_paths(path)
         .filter(|dir| !dir.as_os_str().is_empty())
-        .map(|dir| dir.join("gitui"))
+        .map(|dir| dir.join(name))
         .find(|candidate| is_executable(candidate))
     else {
         return Ok(None);
     };
-    canonical_absolute(candidate).map(Some)
+    canonical_absolute(candidate, name).map(Some)
 }
 
 /// Canonicalizes a candidate to an absolute path. There is deliberately no
 /// working-directory fallback: the action and pane processes can have different
 /// cwds, so guessing would break the pane-safety contract.
-fn canonical_absolute(candidate: PathBuf) -> Result<PathBuf, String> {
+fn canonical_absolute(candidate: PathBuf, name: &str) -> Result<PathBuf, String> {
     std::fs::canonicalize(&candidate).map_err(|e| {
         format!(
-            "found gitui at {} but cannot resolve it to an absolute path: {e}",
+            "found {name} at {} but cannot resolve it to an absolute path: {e}",
             candidate.display()
         )
     })
@@ -129,8 +139,8 @@ mod tests {
         }
     }
 
-    fn write_gitui(dir: &Path, executable: bool) {
-        let path = dir.join("gitui");
+    fn write_tool(dir: &Path, name: &str, executable: bool) {
+        let path = dir.join(name);
         std::fs::write(&path, "#!/bin/sh\n").unwrap();
         #[cfg(unix)]
         {
@@ -144,9 +154,9 @@ mod tests {
 
     #[test]
     fn empty_path_has_no_gitui() {
-        assert!(first_in_path("").unwrap().is_none());
+        assert!(first_in_path("", "gitui").unwrap().is_none());
         assert!(
-            first_in_path(":/nonexistent-dir-for-herdr-test:")
+            first_in_path(":/nonexistent-dir-for-herdr-test:", "gitui")
                 .unwrap()
                 .is_none()
         );
@@ -156,14 +166,14 @@ mod tests {
     fn first_executable_entry_wins() {
         let first = TempDir::new("first");
         let second = TempDir::new("second");
-        write_gitui(first.path(), true);
-        write_gitui(second.path(), true);
+        write_tool(first.path(), "gitui", true);
+        write_tool(second.path(), "gitui", true);
         let path = std::env::join_paths([first.path(), second.path()])
             .unwrap()
             .to_string_lossy()
             .into_owned();
         assert_eq!(
-            first_in_path(&path).unwrap(),
+            first_in_path(&path, "gitui").unwrap(),
             Some(first.path().join("gitui"))
         );
     }
@@ -172,13 +182,13 @@ mod tests {
     fn non_executable_entry_is_skipped_and_result_is_absolute() {
         let first = TempDir::new("nonexec");
         let second = TempDir::new("exec");
-        write_gitui(first.path(), false);
-        write_gitui(second.path(), true);
+        write_tool(first.path(), "gitui", false);
+        write_tool(second.path(), "gitui", true);
         let path = std::env::join_paths([first.path(), second.path()])
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let found = first_in_path(&path).unwrap().unwrap();
+        let found = first_in_path(&path, "gitui").unwrap().unwrap();
         assert_eq!(found, second.path().join("gitui"));
         assert!(found.is_absolute());
     }
@@ -186,19 +196,41 @@ mod tests {
     #[test]
     fn relative_path_entry_resolves_to_absolute() {
         let dir = TempDir::new("relpath");
-        write_gitui(dir.path(), true);
+        write_tool(dir.path(), "gitui", true);
         let _cwd = CwdGuard::set(dir.path());
-        let found = first_in_path(".").unwrap().unwrap();
+        let found = first_in_path(".", "gitui").unwrap().unwrap();
         assert!(found.is_absolute());
         assert_eq!(found, dir.path().join("gitui"));
     }
 
     #[test]
-    fn missing_path_entry_errors_with_install_hint() {
-        for path in ["", ":"] {
-            let err = resolve_gitui(path).unwrap_err();
-            assert!(err.contains("gitui not found"), "{err}");
-            assert!(err.contains("https://github.com/gitui-org/gitui"), "{err}");
-        }
+    fn empty_path_resolves_to_no_tools() {
+        assert!(resolve_tools("").unwrap().is_empty());
+        assert!(resolve_tools(":").unwrap().is_empty());
+    }
+
+    #[test]
+    fn each_tool_uses_its_first_executable_path_match() {
+        let first = TempDir::new("both-first");
+        let second = TempDir::new("both-second");
+        write_tool(first.path(), "gitui", true);
+        write_tool(first.path(), "lazygit", false);
+        write_tool(second.path(), "gitui", true);
+        write_tool(second.path(), "lazygit", true);
+        let path = std::env::join_paths([first.path(), second.path()])
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let tools = resolve_tools(&path).unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].id, "gitui");
+        assert_eq!(tools[0].path, first.path().join("gitui").to_string_lossy());
+        assert_eq!(tools[1].id, "lazygit");
+        assert_eq!(
+            tools[1].path,
+            second.path().join("lazygit").to_string_lossy()
+        );
+        assert!(tools.iter().all(|tool| Path::new(&tool.path).is_absolute()));
     }
 }
