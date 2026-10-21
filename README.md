@@ -1,12 +1,5 @@
 ## herdr-git
 
-[![Release](https://img.shields.io/github/v/release/alexeyco/herdr-git?label=release&color=blue)](https://github.com/alexeyco/herdr-git/releases/latest)
-[![CI](https://github.com/alexeyco/herdr-git/actions/workflows/ci.yml/badge.svg)](https://github.com/alexeyco/herdr-git/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Platforms](https://img.shields.io/badge/platforms-linux%20%C2%B7%20macos-lightgrey)](https://github.com/alexeyco/herdr-git/releases/latest)
-[![Rust 1.96.1+](https://img.shields.io/badge/rust-1.96.1%2B-blue.svg)](https://www.rust-lang.org)
-[![herdr plugin](https://img.shields.io/badge/herdr-plugin-8A2BE2)](https://herdr.dev)
-
 ![herdr-git](assets/banner.svg)
 
 herdr plugin that opens [gitui](https://github.com/gitui-org/gitui) or [lazygit](https://github.com/jesseduffield/lazygit) in a herdr pane and reports what the session changed to the agent.
