@@ -70,15 +70,47 @@ Bind the action as `alexeyco.git.open`. Users must update their own keybindings 
 
 ## Comparison
 
-This compares `herdr-git` with using either supported Git TUI directly. “Built in” means available without user-written scripts or extra integrations.
+How herdr-git compares with other Git TUI plugins for herdr and one adjacent Git workflow plugin, using the four selection criteria below as documented in their public sources.
 
-| Capability                                               | [herdr-git](https://github.com/alexeyco/herdr-git) | [gitui](https://github.com/gitui-org/gitui) | [lazygit](https://github.com/jesseduffield/lazygit) |
-| -------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------- | --------------------------------------------------- |
-| Runs as a herdr plugin action                            | ✅                                                 | ❌                                          | ❌                                                  |
-| Git TUI                                                  | Choose gitui or lazygit                            | gitui                                       | lazygit                                             |
-| Opens the TUI in a herdr pane                            | ✅                                                 | ❌                                          | ❌                                                  |
-| Sends a Git session summary to the focused agent on exit | ✅                                                 | ❌                                          | ❌                                                  |
-| Configures pane placement through herdr `config.toml`    | ✅                                                 | ❌                                          | ❌                                                  |
+✅ documented in the linked sources · ⚠️ partial or implemented differently · ❌ not found in the public sources checked
+
+|                                                                                        | [herdr-git](https://github.com/alexeyco/herdr-git) | [Crokily](https://github.com/Crokily/herdr-lazygit) | [Jacques](https://github.com/JacquesvanWyk/herdr-lazygit) | [beomjungil](https://github.com/beomjungil/herdr-lazygit-overlay) | [herdr-sidebar](https://github.com/alexarthurs/herdr-sidebar) |
+| -------------------------------------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------- |
+| Flexible launch placement                                                              | ✅[^1]                                             | ✅[^2]                                              | ✅[^3]                                                    | ⚠️[^4]                                                            | ⚠️[^5]                                                        |
+| Supports `gitui`                                                                       | ✅                                                 | ❌                                                  | ❌                                                        | ❌                                                                | ❌[^6]                                                        |
+| Supports `lazygit`                                                                     | ✅                                                 | ✅                                                  | ✅                                                        | ✅                                                                | ❌[^6]                                                        |
+| Feedback to the agent (a Git-change summary is sent to the caller after the TUI exits) | ✅[^7]                                             | ❌                                                  | ❌                                                        | ❌                                                                | ❌                                                            |
+
+[^1]: herdr-git reads pane placement from `config.toml` — [configuration](https://github.com/alexeyco/herdr-git#configuration).
+
+[^2]: Crokily documents configurable sidebar or expanded split/tab layouts — [source](https://github.com/Crokily/herdr-lazygit).
+
+[^3]: Jacques provides separate actions for split and tab placement — [source](https://github.com/JacquesvanWyk/herdr-lazygit).
+
+[^4]: beomjungil opens a fixed session-modal popup over the active pane — [source](https://github.com/beomjungil/herdr-lazygit-overlay).
+
+[^5]: herdr-sidebar provides a dockable Git workflow pane; its README does not describe choosing a launch placement for a Git TUI — [source](https://github.com/alexarthurs/herdr-sidebar).
+
+[^6]: herdr-sidebar documents built-in Source Control, not launching an external Git TUI — [source](https://github.com/alexarthurs/herdr-sidebar).
+
+[^7]: After the selected TUI exits, herdr-git sends an English summary of Git changes to the caller agent.
+
+Feature cells checked 2026-10-21 against the linked public READMEs.
+
+<details>
+<summary>Detailed comparison</summary>
+
+|                    | [herdr-git](https://github.com/alexeyco/herdr-git)                  | [Crokily](https://github.com/Crokily/herdr-lazygit)                    | [Jacques](https://github.com/JacquesvanWyk/herdr-lazygit)                                   | [beomjungil](https://github.com/beomjungil/herdr-lazygit-overlay)  | [herdr-sidebar](https://github.com/alexarthurs/herdr-sidebar)                |
+| ------------------ | ------------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| Flexible placement | Configured Herdr pane placement                                     | Sidebar, expanded layout, split, or tab                                | Split pane or tab                                                                           | Fixed session-modal popup over the active pane                     | Dockable Explorer and Source Control pane                                    |
+| Supports `gitui`   | Yes                                                                 | No documented support                                                  | No documented support                                                                       | No documented support                                              | No documented support                                                        |
+| Supports `lazygit` | Yes                                                                 | Yes                                                                    | Yes                                                                                         | Yes                                                                | No documented support                                                        |
+| Agent feedback     | Sends a Git-change summary to the caller agent after the TUI exits  | Does not document sending a Git-change summary to the caller agent     | Does not document sending a Git-change summary to the caller agent                          | Does not document sending a Git-change summary to the caller agent | Does not document sending a Git-change summary to the caller agent           |
+| Latest release     | [v0.2.0](https://github.com/alexeyco/herdr-git/releases/tag/v0.2.0) | [v0.4.0](https://github.com/Crokily/herdr-lazygit/releases/tag/v0.4.0) | [v0.1.0 tag](https://github.com/JacquesvanWyk/herdr-lazygit/tree/v0.1.0); no GitHub release | No GitHub release published                                        | [v0.15.1](https://github.com/alexarthurs/herdr-sidebar/releases/tag/v0.15.1) |
+
+</details>
+
+Among these plugins, herdr-git is the only one that documents support for both `gitui` and `lazygit` and sends a Git-change summary to the caller agent after the TUI exits.
 
 When you quit the selected TUI, the plugin compares read-only before/after git snapshots and builds an English summary of what changed:
 
