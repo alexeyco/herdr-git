@@ -10,6 +10,62 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::features::action::ports::Preferences as PreferencesPort;
+use crate::features::session::ports::{
+    Clock as ClockPort, StateFileEntry, StateFilesystem as StateFilesystemPort,
+};
+
+/// Concrete adapter for persisted tool preferences and picker handoffs.
+pub(crate) struct StateAdapter;
+
+impl StateFilesystemPort for StateAdapter {
+    fn create_dir_all(&self, path: &std::path::Path) -> std::io::Result<()> {
+        fs::create_dir_all(path)
+    }
+
+    fn write(&self, path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+        fs::write(path, contents)
+    }
+
+    fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+        fs::remove_file(path)
+    }
+
+    fn read_dir(&self, path: &std::path::Path) -> std::io::Result<Vec<StateFileEntry>> {
+        Ok(fs::read_dir(path)?
+            .flatten()
+            .map(|entry| {
+                let file_path = entry.path();
+                let modified = entry.metadata().and_then(|metadata| metadata.modified());
+                StateFileEntry {
+                    path: file_path,
+                    modified,
+                }
+            })
+            .collect())
+    }
+}
+
+impl ClockPort for StateAdapter {
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
+
+    fn process_id(&self) -> u32 {
+        std::process::id()
+    }
+}
+
+impl PreferencesPort for StateAdapter {
+    fn last_tool(&self) -> Option<String> {
+        read_last_tool().map(str::to_string)
+    }
+
+    fn save_last_tool(&self, tool_id: &str) {
+        save_last_tool(tool_id);
+    }
+}
+
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// One-shot handoff from a compact picker popup to the action process that
@@ -130,16 +186,6 @@ pub(crate) fn save_last_tool(tool_id: &str) {
     }
 }
 
-/// Attempts to save a preference under a caller-provided state directory.
-/// Kept separate so picker-flow tests can exercise a real filesystem failure.
-#[cfg(test)]
-pub(crate) fn try_save_last_tool_to(dir: &std::path::Path, tool_id: &str) -> std::io::Result<()> {
-    if !matches!(tool_id, "gitui" | "lazygit") {
-        return Ok(());
-    }
-    write_last_tool_to(dir, tool_id)
-}
-
 fn write_last_tool(tool_id: &str) -> std::io::Result<()> {
     write_last_tool_to(&state_dir(), tool_id)
 }
@@ -191,24 +237,26 @@ mod tests {
     struct StateDir {
         _lock: std::sync::MutexGuard<'static, ()>,
         previous: Option<std::ffi::OsString>,
-        path: PathBuf,
+        directory: tempfile::TempDir,
     }
 
     impl StateDir {
         fn new() -> Self {
             let lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
             let previous = std::env::var_os("HERDR_PLUGIN_STATE_DIR");
-            let path = std::env::temp_dir().join(format!(
-                "herdr-git-state-test-{}-{}",
-                std::process::id(),
-                TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-            ));
-            unsafe { std::env::set_var("HERDR_PLUGIN_STATE_DIR", &path) };
+            let directory = tempfile::tempdir().unwrap();
+            unsafe {
+                std::env::set_var("HERDR_PLUGIN_STATE_DIR", directory.path());
+            }
             Self {
                 _lock: lock,
                 previous,
-                path,
+                directory,
             }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            self.directory.path()
         }
     }
 
@@ -218,7 +266,6 @@ mod tests {
                 Some(value) => unsafe { std::env::set_var("HERDR_PLUGIN_STATE_DIR", value) },
                 None => unsafe { std::env::remove_var("HERDR_PLUGIN_STATE_DIR") },
             }
-            let _ = fs::remove_dir_all(&self.path);
         }
     }
 
@@ -227,7 +274,7 @@ mod tests {
         let state = StateDir::new();
         save_last_tool("lazygit");
         assert_eq!(
-            fs::read(state.path.join("last-tool")).unwrap(),
+            fs::read(state.path().join("last-tool")).unwrap(),
             b"lazygit\n"
         );
         assert_eq!(read_last_tool(), Some("lazygit"));
@@ -257,25 +304,37 @@ mod tests {
     fn missing_empty_and_unknown_preferences_are_ignored() {
         let state = StateDir::new();
         assert_eq!(read_last_tool(), None);
-        fs::create_dir_all(&state.path).unwrap();
-        fs::write(state.path.join("last-tool"), "\n").unwrap();
+        fs::write(state.path().join("last-tool"), "\n").unwrap();
         assert_eq!(read_last_tool(), None);
-        fs::write(state.path.join("last-tool"), "other\n").unwrap();
+        fs::write(state.path().join("last-tool"), "other\n").unwrap();
         assert_eq!(read_last_tool(), None);
     }
 
     #[test]
     fn unreadable_preference_is_ignored() {
         let state = StateDir::new();
-        fs::create_dir_all(state.path.join("last-tool")).unwrap();
+        fs::create_dir(state.path().join("last-tool")).unwrap();
         assert_eq!(read_last_tool(), None);
     }
 
     #[test]
     fn failed_save_does_not_panic_or_replace_selection() {
         let state = StateDir::new();
-        fs::create_dir_all(state.path.join("last-tool")).unwrap();
+        fs::create_dir(state.path().join("last-tool")).unwrap();
         save_last_tool("gitui");
         assert_eq!(read_last_tool(), None);
+    }
+
+    #[test]
+    fn filesystem_adapter_lists_temporary_session_files_with_modification_times() {
+        let directory = tempfile::tempdir().unwrap();
+        let summary = directory.path().join("42-1234.txt");
+        fs::write(&summary, "gitui session summary:\n\nchanged files").unwrap();
+
+        let entries = StateAdapter.read_dir(directory.path()).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, summary);
+        assert!(entries[0].modified.is_ok());
     }
 }

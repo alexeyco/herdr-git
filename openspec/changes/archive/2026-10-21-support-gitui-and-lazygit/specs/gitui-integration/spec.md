@@ -1,4 +1,4 @@
-# gitui-integration Specification
+# GitUI integration
 
 ## MODIFIED Requirements
 

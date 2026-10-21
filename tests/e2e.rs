@@ -355,8 +355,8 @@ fn manifest_declares_all_pane_entrypoints_and_placements() {
         .iter()
         .find(|pane| pane["id"].as_str() == Some("picker"))
         .unwrap();
-    assert_eq!(picker["width"].as_integer(), Some(52));
-    assert_eq!(picker["height"].as_integer(), Some(7));
+    assert_eq!(picker["width"].as_integer(), Some(24));
+    assert_eq!(picker["height"].as_integer(), Some(6));
 }
 
 #[test]
@@ -1459,6 +1459,7 @@ fn action_with_both_tools_requests_picker_every_time_with_context_and_saved_choi
             open.contains("--plugin alexeyco.git --entrypoint picker --placement popup"),
             "{open}"
         );
+        assert!(open.contains("--width 24 --height 6"), "{open}");
         assert!(
             open.contains(&format!("--cwd {}", repo.display())),
             "{open}"

@@ -1,4 +1,4 @@
-# tool-selection Specification
+# Tool selection
 
 ## Purpose
 

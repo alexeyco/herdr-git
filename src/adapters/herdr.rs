@@ -7,7 +7,96 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::features::action::ports::{
+    Herdr as HerdrPort, PaneOpen as ActionPaneOpen, PickerPopupRequest as ActionPickerRequest,
+    SelectedToolPaneRequest as ActionSelectedRequest,
+};
+use crate::features::session::ports::Herdr as SessionHerdrPort;
 use crate::settings::{Direction, Placement};
+
+/// Concrete action-facing adapter over this module's Herdr CLI operations.
+pub(crate) struct HerdrAdapter;
+
+impl HerdrPort for HerdrAdapter {
+    fn open_setup_popup(&self) -> Result<(), String> {
+        open_setup_popup()
+    }
+
+    fn open_picker_popup(&self, request: ActionPickerRequest) -> Result<(), String> {
+        open_picker_popup(PickerPopupRequest {
+            cwd: &request.cwd,
+            gitui_path: request.gitui_path.as_deref(),
+            lazygit_path: request.lazygit_path.as_deref(),
+            last_tool: request.last_tool.as_deref().and_then(|tool| match tool {
+                "gitui" => Some("gitui"),
+                "lazygit" => Some("lazygit"),
+                _ => None,
+            }),
+            workspace_id: request.workspace_id.as_deref(),
+            caller_pane: request.caller_pane.as_deref(),
+            caller_agent: request.caller_agent.as_deref(),
+            caller_tab: request.caller_tab.as_deref(),
+            selection_file: request.selection_file.as_deref(),
+        })
+    }
+
+    fn open_selected_tool_pane(
+        &self,
+        request: ActionSelectedRequest,
+    ) -> Result<ActionPaneOpen, String> {
+        let result = selected_tool_pane_open(SelectedToolPaneRequest {
+            context: PaneOpenContext {
+                placement: request.placement,
+                direction: request.direction,
+                popup_size: PopupSize {
+                    width: request.popup_size.width.as_deref(),
+                    height: request.popup_size.height.as_deref(),
+                },
+                workspace_id: request.workspace_id.as_deref(),
+                cwd: &request.cwd,
+                caller_pane: request.caller_pane.as_deref(),
+                caller_agent: request.caller_agent.as_deref(),
+            },
+            tool_id: &request.tool_id,
+            tool_path: &request.tool_path,
+            caller_tab: request.caller_tab.as_deref(),
+        })?;
+        Ok(match result {
+            PaneOpen::Pane { pane_id, tab_id } => ActionPaneOpen::Pane { pane_id, tab_id },
+            PaneOpen::Popup => ActionPaneOpen::Popup,
+        })
+    }
+
+    fn close_picker_popup(&self) -> Result<(), String> {
+        popup_close()
+    }
+
+    fn focus_tab(&self, tab_id: String) -> Result<String, String> {
+        tab_focus(&tab_id)
+    }
+}
+
+impl SessionHerdrPort for HerdrAdapter {
+    fn require_bin(&self) -> Result<(), String> {
+        require_bin()
+    }
+
+    fn agent_prompt(&self, target_pane: &str, text: &str) -> Result<(), String> {
+        agent_prompt(target_pane, text)
+    }
+
+    fn close_pane(&self, pane_id: &str) -> Result<(), String> {
+        pane_close(pane_id)
+    }
+
+    fn close_tab(&self, tab_id: &str) -> Result<(), String> {
+        tab_close(tab_id)
+    }
+
+    fn focus_tab(&self, tab_id: &str) -> Result<String, String> {
+        tab_focus(tab_id)
+    }
+}
 
 /// Runs the herdr binary with `args`, returning stdout on success.
 fn exec(args: &[&str]) -> Result<String, String> {
@@ -79,6 +168,11 @@ pub(crate) struct SelectedToolPaneRequest<'a> {
 pub(crate) fn selected_tool_pane_open(
     request: SelectedToolPaneRequest<'_>,
 ) -> Result<PaneOpen, String> {
+    let args = selected_tool_pane_args(request);
+    open_pane_args(&args, request.context.placement)
+}
+
+fn selected_tool_pane_args(request: SelectedToolPaneRequest<'_>) -> Vec<String> {
     let SelectedToolPaneRequest {
         context,
         tool_id,
@@ -113,7 +207,7 @@ pub(crate) fn selected_tool_pane_open(
         args.extend(["--env".to_string(), format!("HERDR_GITUI_CALLER_TAB={tab}")]);
     }
     args.push(focus);
-    open_pane_args(&args, context.placement)
+    args
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -197,6 +291,14 @@ fn selection_popup_args(request: SelectionPopupRequest<'_>) -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect::<Vec<_>>();
+    if request.entrypoint == "picker" {
+        args.extend([
+            "--width".to_string(),
+            "24".to_string(),
+            "--height".to_string(),
+            "6".to_string(),
+        ]);
+    }
     if let Some(dir) = request.cwd {
         args.extend(["--cwd".to_string(), dir.to_string()]);
     }
@@ -579,6 +681,94 @@ mod tests {
     );
     /// The popup reply verified live on herdr 0.9.5: no pane id, no tab id.
     const POPUP_OK: &str = r#"{"id":"cli:plugin","result":{"type":"ok"}}"#;
+
+    #[test]
+    fn selected_session_pane_args_forward_caller_tab() {
+        let args = selected_tool_pane_args(SelectedToolPaneRequest {
+            context: PaneOpenContext {
+                placement: Placement::Tab,
+                direction: Direction::Right,
+                popup_size: PopupSize::default(),
+                workspace_id: None,
+                cwd: "/repo",
+                caller_pane: None,
+                caller_agent: None,
+            },
+            tool_id: "lazygit",
+            tool_path: "/canonical/bin/lazygit",
+            caller_tab: Some("tab-1"),
+        });
+        let got = args.iter().map(String::as_str).collect::<Vec<_>>();
+
+        assert_eq!(
+            got,
+            [
+                "plugin",
+                "pane",
+                "open",
+                "--plugin",
+                "alexeyco.git",
+                "--entrypoint",
+                "open",
+                "--placement",
+                "tab",
+                "--cwd",
+                "/repo",
+                "--env",
+                "HERDR_GITUI_DIR=/repo",
+                "--env",
+                "HERDR_GIT_TOOL=lazygit",
+                "--env",
+                "HERDR_GIT_TOOL_PATH=/canonical/bin/lazygit",
+                "--env",
+                "HERDR_GITUI_CALLER_TAB=tab-1",
+                "--focus",
+            ]
+        );
+    }
+
+    #[test]
+    fn selected_session_pane_args_are_exact_with_minimal_context() {
+        let args = selected_tool_pane_args(SelectedToolPaneRequest {
+            context: PaneOpenContext {
+                placement: Placement::Tab,
+                direction: Direction::Right,
+                popup_size: PopupSize::default(),
+                workspace_id: None,
+                cwd: "/repo",
+                caller_pane: None,
+                caller_agent: None,
+            },
+            tool_id: "gitui",
+            tool_path: "/canonical/bin/gitui",
+            caller_tab: None,
+        });
+        let got = args.iter().map(String::as_str).collect::<Vec<_>>();
+
+        assert_eq!(
+            got,
+            [
+                "plugin",
+                "pane",
+                "open",
+                "--plugin",
+                "alexeyco.git",
+                "--entrypoint",
+                "open",
+                "--placement",
+                "tab",
+                "--cwd",
+                "/repo",
+                "--env",
+                "HERDR_GITUI_DIR=/repo",
+                "--env",
+                "HERDR_GIT_TOOL=gitui",
+                "--env",
+                "HERDR_GIT_TOOL_PATH=/canonical/bin/gitui",
+                "--focus",
+            ]
+        );
+    }
 
     struct MockSocket {
         request: Vec<u8>,
@@ -1363,7 +1553,7 @@ mod tests {
         });
         let got = args.iter().map(String::as_str).collect::<Vec<_>>();
         assert_eq!(
-            &got[..11],
+            &got[..15],
             [
                 "plugin",
                 "pane",
@@ -1374,6 +1564,10 @@ mod tests {
                 "picker",
                 "--placement",
                 "popup",
+                "--width",
+                "24",
+                "--height",
+                "6",
                 "--cwd",
                 "/repo",
             ]

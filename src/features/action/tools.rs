@@ -18,7 +18,7 @@ pub(crate) struct Tool {
 }
 
 /// Finds supported tools on `PATH`, in deterministic gitui/lazygit order.
-pub(crate) fn find_tools() -> Result<Vec<Tool>, String> {
+pub(crate) fn discover() -> Result<Vec<Tool>, String> {
     let path = std::env::var("PATH").unwrap_or_default();
     resolve_tools(&path)
 }

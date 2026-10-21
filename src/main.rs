@@ -12,16 +12,9 @@
 //! Plugin docs: https://herdr.dev/docs/plugins/
 //! gitui: https://github.com/gitui-org/gitui
 
-mod context;
-mod git;
-mod gitui;
-mod herdr;
-mod picker;
-mod session;
+mod adapters;
+mod features;
 mod settings;
-mod setup;
-mod state;
-mod summary;
 
 fn main() {
     if let Err(e) = run() {
@@ -29,7 +22,7 @@ fn main() {
         // Plugin panes auto-close when this process exits, so pane-mode errors
         // must block until the user has read the message.
         if env_set("HERDR_PLUGIN_ENTRYPOINT_ID") {
-            session::hold_pane();
+            features::session::hold_pane();
         }
         std::process::exit(1);
     }
@@ -64,14 +57,18 @@ fn run_mode() -> RunMode {
 fn run() -> Result<(), String> {
     match run_mode() {
         RunMode::Pane(entrypoint) => match entrypoint.as_str() {
-            "open" => session::run_pane(),
-            "picker" => session::run_picker(),
-            "setup" => setup::run(),
+            "open" => features::session::run_pane(),
+            "picker" => features::picker_entry::run(),
+            "setup" => features::setup::run(),
             unknown => Err(format!(
                 "unknown pane entrypoint '{unknown}'; expected one of: open, picker, setup"
             )),
         },
-        RunMode::Action => session::run_action(),
+        RunMode::Action => {
+            let herdr = adapters::herdr::HerdrAdapter;
+            let preferences = adapters::state::StateAdapter;
+            features::action::workflow::run(&herdr, &preferences)
+        }
         RunMode::Outside => Err("invoked outside herdr plugin context".to_string()),
     }
 }

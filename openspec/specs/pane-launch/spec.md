@@ -1,4 +1,4 @@
-# pane-launch
+# Pane launch
 
 ## Purpose
 

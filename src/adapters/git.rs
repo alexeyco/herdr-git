@@ -7,25 +7,101 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-/// Read-only git state captured at a point in time.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct Snapshot {
-    /// Whether the directory is a git work tree.
-    pub(crate) in_repo: bool,
-    /// Current branch name (`None` for detached HEAD or no commits).
-    pub(crate) branch: Option<String>,
-    /// Full SHA of HEAD (`None` when no commits).
-    pub(crate) head: Option<String>,
-    /// Upstream ref, e.g. `origin/main` (`None` when unset).
-    pub(crate) upstream: Option<String>,
-    /// Number of commits ahead of upstream (`None` when no upstream).
-    pub(crate) ahead: Option<u64>,
-    /// Count of staged files.
-    pub(crate) staged: u64,
-    /// Count of unstaged (modified) files.
-    pub(crate) unstaged: u64,
-    /// Count of untracked files.
-    pub(crate) untracked: u64,
+use crate::features::session::ports::Git as GitPort;
+use crate::features::session::{ports::Snapshot, summary_engine::CommitLine};
+
+/// Read-only Git adapter scoped to a single session directory.
+pub(crate) struct GitAdapter<'a> {
+    dir: &'a Path,
+}
+
+impl<'a> GitAdapter<'a> {
+    pub(crate) fn new(dir: &'a Path) -> Self {
+        Self { dir }
+    }
+}
+
+impl GitPort for GitAdapter<'_> {
+    fn snapshot(&self, dir: &Path) -> Snapshot {
+        crate::adapters::git::snapshot(dir)
+    }
+
+    fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Option<bool> {
+        let args = ["merge-base", "--is-ancestor", ancestor, descendant];
+        let out = run_git_quiet(self.dir, &args)?;
+        match out.status.code() {
+            Some(0) => Some(true),
+            Some(1) => Some(false),
+            code => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                eprintln!(
+                    "herdr-gitui: warning: git probe failed (git {}): exit {}",
+                    args.join(" "),
+                    code.map(|value| value.to_string())
+                        .unwrap_or_else(|| "signal".to_string())
+                );
+                if !stderr.trim().is_empty() {
+                    eprintln!("herdr-gitui: warning: {}", stderr.trim());
+                }
+                None
+            }
+        }
+    }
+
+    fn log_range(&self, from: &str, to: &str) -> Option<Vec<CommitLine>> {
+        let range = format!("{from}..{to}");
+        let args = [
+            "log",
+            "--no-merges",
+            "--reverse",
+            "--format=%h%x09%s",
+            &range,
+        ];
+        let out = run_git_quiet(self.dir, &args)?;
+        out.status
+            .success()
+            .then(|| parse_commit_lines(&out.stdout))
+    }
+
+    fn has_merges_in_range(&self, from: &str, to: &str) -> Option<bool> {
+        let range = format!("{from}..{to}");
+        let args = ["rev-list", "--merges", &range];
+        let out = run_git_quiet(self.dir, &args)?;
+        out.status
+            .success()
+            .then(|| !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+    }
+
+    fn log_head(&self, head: &str, count: usize) -> Option<Vec<CommitLine>> {
+        let count = count.to_string();
+        let args = [
+            "log",
+            "--no-merges",
+            "--format=%h%x09%s",
+            "-n",
+            &count,
+            head,
+        ];
+        let out = run_git_quiet(self.dir, &args)?;
+        out.status
+            .success()
+            .then(|| parse_commit_lines(&out.stdout))
+    }
+}
+
+fn parse_commit_lines(data: &[u8]) -> Vec<CommitLine> {
+    String::from_utf8_lossy(data)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            let mut parts = line.splitn(2, '\t');
+            let hash = parts.next()?.trim();
+            (!hash.is_empty()).then(|| CommitLine {
+                hash: hash.to_string(),
+                subject: parts.next().unwrap_or("").to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Probes `dir` read-only and returns its git snapshot. On any unexpected git

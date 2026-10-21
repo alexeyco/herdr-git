@@ -5,7 +5,7 @@
 //! trait for the few git queries summary needs, so every rule is testable with
 //! synthetic inputs — no git required.
 
-use crate::git::Snapshot;
+use crate::features::session::ports::Snapshot;
 
 /// A single commit line: short hash and subject.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,14 +17,9 @@ pub(crate) struct CommitLine {
 /// Git queries the summary builder needs. The real implementation calls git;
 /// tests provide a mock.
 pub(crate) trait GitQueries {
-    /// Is `ancestor` an ancestor of `descendant`? `None` on probe failure.
     fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Option<bool>;
-    /// Commit log lines for `from..to` range (no merges, reverse). `None` on
-    /// probe failure.
     fn log_range(&self, from: &str, to: &str) -> Option<Vec<CommitLine>>;
-    /// Whether there are merge commits in `from..to`. `None` on probe failure.
     fn has_merges_in_range(&self, from: &str, to: &str) -> Option<bool>;
-    /// Up to `n` commit log lines from a single commit. `None` on probe failure.
     fn log_head(&self, head: &str, n: usize) -> Option<Vec<CommitLine>>;
 }
 

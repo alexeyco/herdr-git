@@ -1,4 +1,4 @@
-# session-outcomes Specification
+# Session outcomes
 
 ## MODIFIED Requirements
 

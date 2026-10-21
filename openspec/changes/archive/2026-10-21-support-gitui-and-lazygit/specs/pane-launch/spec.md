@@ -1,4 +1,4 @@
-# pane-launch Specification
+# Pane launch
 
 ## MODIFIED Requirements
 

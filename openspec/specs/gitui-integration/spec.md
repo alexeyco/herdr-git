@@ -1,4 +1,4 @@
-# gitui-integration
+# GitUI integration
 
 ## Purpose
 

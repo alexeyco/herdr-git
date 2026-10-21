@@ -4,7 +4,20 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.2.0 - Unreleased
+## 0.3.0
+
+### Added
+
+- Support gitui and lazygit: open the only installed tool directly, choose and remember a preference when both are installed, and show installation links when neither is available.
+- Add a README comparison of herdr-git, gitui, and lazygit.
+
+### Changed
+
+- Rename the action from `alexeyco.gitui.open` to `alexeyco.git.open`; existing keybindings and scripts must be updated manually.
+- Replace the picker with a borderless 24×6 interface with blank rows around the tool list, reverse-video highlighting, and no help line.
+- Refactor the Rust implementation into adapter and feature modules while preserving plugin behavior.
+
+## 0.2.0
 
 ### Added
 
@@ -14,7 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `split` and `zoomed` panes target the caller pane (`--target-pane`); `--workspace` is passed only for `tab`; a `split`/`zoomed` placement with no resolvable caller pane falls back to `tab` with a warning.
 - `popup` placement: a centered session-modal gitui window that leaves the tiled layout untouched, sized by `width`/`height` (herdr default half-size when unset), with no pane-close calls at teardown and summary delivery unchanged.
 
-## 0.1.0 - 2026-10-13
+## 0.1.0
 
 ### Added
 
