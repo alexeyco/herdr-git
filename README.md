@@ -62,7 +62,7 @@ Release binaries are unsigned. macOS may quarantine them on first run; `xattr -d
 
 ## Usage
 
-Any chord works; see the [herdr keyboard docs](https://herdr.dev/docs/keyboard/) for picking one that your terminal doesn't swallow.
+Any chord works; see the [herdr keyboard docs](https://herdr.dev/tui/docs/keyboard/) for picking one that your terminal doesn't swallow.
 
 The plugin discovers executable `gitui` and `lazygit` programs on `PATH`; install the programs yourself. If neither is found, a setup popup links to both projects. If exactly one is found, the plugin opens it directly without a picker. If both are found, a picker appears on every invocation and preselects your last explicit choice. Use the arrow keys or `k`/`j` to move, Enter to choose, or Esc/`q` to cancel. Your choice opens in the configured herdr pane placement.
 
@@ -81,7 +81,7 @@ How herdr-git compares with other Git TUI plugins for herdr and one adjacent Git
 | Supports `lazygit`                                                                     | ✅                                                 | ✅                                                  | ✅                                                        | ✅                                                                | ❌[^6]                                                        |
 | Feedback to the agent (a Git-change summary is sent to the caller after the TUI exits) | ✅[^7]                                             | ❌                                                  | ❌                                                        | ❌                                                                | ❌                                                            |
 
-[^1]: herdr-git reads pane placement from `config.toml` — [configuration](https://github.com/alexeyco/herdr-git#configuration).
+[^1]: herdr-git reads pane placement from `config.toml` — [configuration](#configuration).
 
 [^2]: Crokily documents configurable sidebar or expanded split/tab layouts — [source](https://github.com/Crokily/herdr-lazygit).
 
@@ -95,7 +95,7 @@ How herdr-git compares with other Git TUI plugins for herdr and one adjacent Git
 
 [^7]: After the selected TUI exits, herdr-git sends an English summary of Git changes to the caller agent.
 
-Feature cells checked 2026-10-21 against the linked public READMEs.
+Feature cells checked 2026-11-02 against the linked public READMEs.
 
 <details>
 <summary>Detailed comparison</summary>
